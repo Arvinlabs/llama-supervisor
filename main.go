@@ -194,15 +194,17 @@ func main() {
 	defer stopSignal()
 
 	if cfg.Restart.Enabled() {
-		log.Printf("[config] restart enabled: interval=%ds command=%q",
-			int(restartInterval(cfg).Seconds()), cfg.Restart.Command)
+		log.Printf("[config] restart enabled: interval=%ds",
+			int(restartInterval(cfg).Seconds()))
+		log.Print("[config] restart command: " + cfg.Restart.Command)
 	} else {
 		log.Print("[config] restart disabled")
 	}
 	if cfg.Probe.Enabled() {
 		pc := buildProbeConfig(cfg.Probe)
-		log.Printf("[config] probe enabled: interval=%ds command=%q model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%ds apiKey=%q",
-			int(probeInterval(cfg).Seconds()), cfg.Probe.Command, pc.model, pc.prompt, pc.maxTokens, pc.repeatLimit, int(pc.timeout.Seconds()), secretMask(pc.apiKey))
+		log.Printf("[config] probe enabled: interval=%ds model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%ds apiKey=%q",
+			int(probeInterval(cfg).Seconds()), pc.model, pc.prompt, pc.maxTokens, pc.repeatLimit, int(pc.timeout.Seconds()), secretMask(pc.apiKey))
+		log.Print("[config] probe command: " + cfg.Probe.Command)
 	} else {
 		log.Print("[config] probe disabled")
 	}
