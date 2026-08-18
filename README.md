@@ -8,7 +8,7 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
 ## 功能
 
 - 反向代理：`host:port` → `backend`
-- 收到第一个请求开始计时；每收到请求重置；两个相互独立的空闲计时器：
+- 计时从服务启动开始（无需等待第一个请求）；每收到请求重置；两个相互独立的空闲计时器：
   - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`：
     - 流式过程中末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy

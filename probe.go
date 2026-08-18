@@ -78,12 +78,10 @@ func (p *probePolicy) consumeIdle(ctx context.Context) bool {
 	return p.tracker.consumeIdle(ctx)
 }
 
-func (p *probePolicy) stop(ctx context.Context) bool {
-	return p.tracker.stop(ctx)
-}
-
 // runProbe 探测后端，异常则执行 probe.command，返回是否实际执行了命令
 func (p *probePolicy) runProbe(ctx context.Context) bool {
+	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%ds",
+		p.backend, p.probe.model, p.probe.prompt, p.probe.maxTokens, p.probe.repeatLimit, int(p.probe.timeout.Seconds()))
 	healthy, err := probeBackend(ctx, p.backend, p.probe)
 	if healthy {
 		log.Print("[probe] backend looks healthy")
@@ -103,11 +101,12 @@ func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy 
 	defer cancel()
 
 	body, err := json.Marshal(map[string]any{
-		"model":       pc.model,
-		"prompt":      pc.prompt,
-		"max_tokens":  pc.maxTokens,
-		"temperature": 0,
-		"stream":      true,
+		"model": pc.model,
+		"messages": []map[string]string{
+			{"role": "user", "content": pc.prompt},
+		},
+		"max_tokens": pc.maxTokens,
+		"stream":     true,
 	})
 	if err != nil {
 		return false, err
@@ -136,10 +135,13 @@ func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy 
 	return probeBackendStreaming(resp.Body, pc)
 }
 
-// sseEvent 一行 SSE 中的单个字段
+// sseEvent 一行 SSE 事件（OpenAI 兼容 chat completion chunk）
 type sseEvent struct {
-	_    struct{} `json:"-"`
-	Data string   `json:"data"`
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
 }
 
 // probeBackendStreaming 读取 SSE 流，判断内容是否退化（连续重复 token）
@@ -163,10 +165,10 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 			continue
 		}
-		if ev.Data == "" {
+		if len(ev.Choices) == 0 {
 			continue
 		}
-		for _, r := range ev.Data {
+		for _, r := range ev.Choices[0].Delta.Content {
 			if r == lastChar {
 				run++
 			} else {
