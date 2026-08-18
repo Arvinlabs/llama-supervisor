@@ -2,7 +2,21 @@
 host: 0.0.0.0
 port: 11808
 backend: 127.0.0.1:11707
+# 空闲计时间隔（秒）：超过该间隔没有请求，下一个请求到来时直接执行 command（重启）
 interval: 20
 command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 # 启动时是否同步执行一次 command（失败则启动失败退出），默认 false
 startupCommand: true
+
+# ===== 后端探测（probe）相关参数 =====
+# 空闲超过 probeInterval 后，下一个请求 proxy 前先流式调用后端 /v1/chat/completions 探测：
+# 流式过程中若末尾字符持续重复（达到 probeRepeatLimit），立即终止并判定 llama server 异常，执行 command
+# 缺省/0 时等同于 interval
+probeInterval: 60
+# 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
+probeApiKey: ""
+probeModel: "default"
+probePrompt: "hi"
+probeMaxTokens: 64
+probeRepeatLimit: 20
+probeTimeout: 5
