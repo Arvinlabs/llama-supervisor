@@ -13,14 +13,16 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 var cfgPath = flag.String("config", "config.yaml", "配置文件路径")
 
 // proxy 反向代理，附加空闲重启与探测逻辑
 type proxy struct {
-	proxy      *httputil.ReverseProxy
-	backendURL string
+	proxy       *httputil.ReverseProxy
+	backendURL  string
+	backendAddr string // backend 的 host:port（启动时校验必须显式带端口）
 
 	restart *restartPolicy // 重启策略（restart 未启用时为 nil）
 	probe   *probePolicy   // 探测策略（probe 未启用时为 nil）
@@ -32,9 +34,13 @@ func newBackendProxy(cfg Config) *proxy {
 	if err != nil {
 		log.Fatalf("backend %q: %v", cfg.Backend, err)
 	}
+	if backend.Hostname() == "" || backend.Port() == "" {
+		log.Fatalf("backend %q: host and explicit port are required", cfg.Backend)
+	}
 	p := &proxy{
-		proxy:      httputil.NewSingleHostReverseProxy(backend),
-		backendURL: cfg.Backend,
+		proxy:       httputil.NewSingleHostReverseProxy(backend),
+		backendURL:  cfg.Backend,
+		backendAddr: backend.Host,
 	}
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy %s %s: %v", r.Method, r.URL.Path, err)
@@ -81,13 +87,37 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p.restart != nil {
 			p.restart.reset()
 		}
+		p.waitBackendReady(ctx)
 		p.proxy.ServeHTTP(w, r)
 		return
 	}
+	ran := false
 	if p.restart != nil {
-		p.restart.consumeIdle(ctx)
+		ran = p.restart.consumeIdle(ctx)
+	}
+	if ran {
+		p.waitBackendReady(ctx)
 	}
 	p.proxy.ServeHTTP(w, r)
+}
+
+// waitBackendReady 执行 command 后等待后端端口可连接，再转发请求
+func (p *proxy) waitBackendReady(ctx context.Context) {
+	log.Printf("[proxy] waiting for backend %s to be ready", p.backendAddr)
+	for {
+		conn, err := net.DialTimeout("tcp", p.backendAddr, 2*time.Second)
+		if err == nil {
+			conn.Close()
+			log.Printf("[proxy] backend ready")
+			return
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			log.Printf("[proxy] wait canceled: %v", ctx.Err())
+			return
+		}
+	}
 }
 
 // runCommand 执行命令并等待完成，ctx 取消时终止命令
