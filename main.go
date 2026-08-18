@@ -38,8 +38,11 @@ func newBackendProxy(cfg Config) *proxy {
 	if backend.Hostname() == "" || backend.Port() == "" {
 		log.Fatalf("backend %q: host and explicit port are required", cfg.Backend)
 	}
+	rp := httputil.NewSingleHostReverseProxy(backend)
+	// FlushInterval=0：每次 Write 后立即 flush，SSE/流式输出无缓冲直达客户端
+	rp.FlushInterval = 0
 	p := &proxy{
-		proxy:       httputil.NewSingleHostReverseProxy(backend),
+		proxy:       rp,
 		backendURL:  cfg.Backend,
 		backendAddr: backend.Host,
 		readyDelay:  time.Duration(cfg.WaitBackendReady) * time.Second,
@@ -79,6 +82,13 @@ type statusRecorder struct {
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Flush 透传 flush：ReverseProxy 需要 ResponseWriter 实现 http.Flusher 才会按 FlushInterval 流式转发
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // ServeHTTP 请求到来时处理，必要时执行命令，然后转发，并记录 access log
