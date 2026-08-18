@@ -106,7 +106,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // startBackground 启动 restart 的独立后台空闲检查：
-// 每秒检查一次，空闲到期则执行 restart.command 并等待后端端口就绪，可周期性重复
+// 每秒检查一次，空闲到期则执行 restart.command，可周期性重复
 func (p *proxy) startBackground(ctx context.Context) {
 	if p.restart == nil {
 		return
@@ -119,9 +119,7 @@ func (p *proxy) startBackground(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if p.restart.consumeIdle(ctx) {
-					p.waitBackendReady(ctx)
-				}
+				p.restart.consumeIdle(ctx)
 			}
 		}
 	}()

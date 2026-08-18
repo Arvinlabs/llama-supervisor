@@ -10,10 +10,10 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
 - 反向代理：`host:port` → `backend`
 - 计时从服务启动开始（无需等待第一个请求）；每收到请求重置；两个相互独立的空闲计时器：
   - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`：
-    - 流式过程中末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
+    - 流式过程中 `reasoning_content` 与 `content` 分别独立判定，任一末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
   - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），空闲达到 `restart.interval`（距最后一次请求/活跃）即执行 `restart.command`，无需等待请求，可周期性重复；每次请求都会重置空闲计时
-- 执行 command（probe 或 restart）后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发
+- probe 判定异常执行 command 后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发（restart 触发时不等待，直接执行命令）
 - 可选（`startupCommand`）启动时同步执行一次命令
 - Ctrl+C / SIGTERM 优雅退出
 
@@ -37,7 +37,7 @@ cp config.yaml.example config.yaml
 | `host` / `port` | 监听地址 |
 | `backend` | 后端地址，如 `http://127.0.0.1:8081` |
 | `startupCommand` | 启动时同步执行的命令(shell) |
-| `waitBackendReady` | 执行 command 后端口就绪后再等多少秒才转发，默认 `0`（秒） |
+| `waitBackendReady` | probe 执行 command 后端口就绪后再等多少秒才转发，默认 `0`（秒） |
 | `restart` | 重启配置对象，`enable: true` 时启用，见下表 |
 | `probe` | 后端探测配置对象，`enable: true` 时启用，见下表 |
 
@@ -60,5 +60,5 @@ cp config.yaml.example config.yaml
 | `probe.model` | 探测请求使用的 model，默认 `default` |
 | `probe.prompt` | 探测提示词，默认 `hi` |
 | `probe.maxTokens` | 探测最大生成 token 数，默认 `64` |
-| `probe.repeatLimit` | 生成内容末尾同一字符连续出现达到该长度即判定异常，默认 `20` |
+| `probe.repeatLimit` | 生成内容（含 `reasoning_content`）末尾同一字符连续出现达到该长度即判定异常，默认 `20` |
 | `probe.timeout` | 探测超时(秒)，默认 `5` |

@@ -135,13 +135,36 @@ func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy 
 	return probeBackendStreaming(resp.Body, pc)
 }
 
-// sseEvent 一行 SSE 事件（OpenAI 兼容 chat completion chunk）
+// sseEvent 一行 SSE 事件（OpenAI 兼容 chat completion chunk，部分模型额外返回 reasoning_content）
 type sseEvent struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 	} `json:"choices"`
+}
+
+// repeatChecker 独立统计某一字段末尾字符的连续重复次数
+type repeatChecker struct {
+	limit    int
+	lastChar rune
+	run      int
+}
+
+func (c *repeatChecker) check(field string, s string) (bool, error) {
+	for _, r := range s {
+		if r == c.lastChar {
+			c.run++
+		} else {
+			c.lastChar = r
+			c.run = 1
+		}
+		if c.run >= c.limit {
+			return false, fmt.Errorf("degenerate %s: %d consecutive repeated char %q", field, c.run, c.lastChar)
+		}
+	}
+	return true, nil
 }
 
 // probeBackendStreaming 读取 SSE 流，判断内容是否退化（连续重复 token）
@@ -149,8 +172,8 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	var lastChar rune
-	var run int
+	reasoningCheck := &repeatChecker{limit: pc.repeatLimit}
+	contentCheck := &repeatChecker{limit: pc.repeatLimit}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -168,16 +191,12 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 		if len(ev.Choices) == 0 {
 			continue
 		}
-		for _, r := range ev.Choices[0].Delta.Content {
-			if r == lastChar {
-				run++
-			} else {
-				lastChar = r
-				run = 1
-			}
-			if run >= pc.repeatLimit {
-				return false, fmt.Errorf("degenerate content: %d consecutive repeated char %q", run, lastChar)
-			}
+		delta := ev.Choices[0].Delta
+		if ok, err := reasoningCheck.check("reasoning_content", delta.ReasoningContent); !ok {
+			return false, err
+		}
+		if ok, err := contentCheck.check("content", delta.Content); !ok {
+			return false, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
