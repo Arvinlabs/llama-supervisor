@@ -1,22 +1,37 @@
-# 复制为 config.yaml 后修改
-host: 0.0.0.0
-port: 11808
-backend: 127.0.0.1:11707
-# 空闲计时间隔（秒）：超过该间隔没有请求，下一个请求到来时直接执行 command（重启）
-interval: 20
-command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
-# 启动时是否同步执行一次 command（失败则启动失败退出），默认 false
-startupCommand: true
+# 监听 host / port
+host: "0.0.0.0"
+port: 8080
 
-# ===== 后端探测（probe）相关参数 =====
-# 空闲超过 probeInterval 后，下一个请求 proxy 前先流式调用后端 /v1/chat/completions 探测：
-# 流式过程中若末尾字符持续重复（达到 probeRepeatLimit），立即终止并判定 llama server 异常，执行 command
-# 缺省/0 时等同于 interval
-probeInterval: 60
-# 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
-probeApiKey: ""
-probeModel: "default"
-probePrompt: "hi"
-probeMaxTokens: 64
-probeRepeatLimit: 20
-probeTimeout: 5
+# 后端 llama.cpp 地址
+backend: "http://127.0.0.1:8081"
+
+# 启动命令
+startupCommand: "sudo /usr/bin/supervisorctl start llama"
+
+# ===== restart 重启配置：enable 为 true 时启用 =====
+restart:
+  enable: true
+  # 空闲多久(秒)触发，默认 600s
+  interval: 300
+  # 执行的命令
+  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
+
+# ===== probe 后端探测配置：enable 为 true 时启用 =====
+probe:
+  enable: true
+  # 空闲多久(秒)触发，默认 600s
+  interval: 600
+  # 探测判定异常后执行的命令
+  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
+  # 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
+  apiKey: ""
+  # 探测模型名，默认 "default"
+  model: "default"
+  # 探测 prompt，默认 "hi"
+  prompt: "hi"
+  # 探测最大生成 token 数，默认 64
+  maxTokens: 64
+  # 连续重复 token 判定异常阈值，默认 20
+  repeatLimit: 20
+  # 探测超时，默认 5s
+  timeout: 5s

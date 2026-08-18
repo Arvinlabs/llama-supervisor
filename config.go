@@ -3,20 +3,87 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// netAddr 组装 "host:port"
-func netAddr(host string, port int) string {
-	return fmt.Sprintf("%s:%d", host, port)
+const defaultInterval = 600 * time.Second
+
+// RestartGroup 重启配置：enable 为 true 表示启用
+type RestartGroup struct {
+	Enable   bool          `yaml:"enable"`   // 是否启用
+	Interval time.Duration `yaml:"interval"` // 空闲多久触发，默认 600s
+	Command  string        `yaml:"command"`  // 超时后执行的命令
 }
 
-// yamlUnmarshalFile 读取并解析 yaml 文件
-func yamlUnmarshalFile(path string, out interface{}) error {
+func (g *RestartGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
+// ProbeGroup 探测配置：enable 为 true 表示启用
+type ProbeGroup struct {
+	Enable      bool          `yaml:"enable"`      // 是否启用
+	Interval    time.Duration `yaml:"interval"`    // 空闲多久触发，默认 600s
+	Command     string        `yaml:"command"`     // 探测判定异常后执行的命令
+	ApiKey      string        `yaml:"apiKey"`      // 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
+	Model       string        `yaml:"model"`       // 探测模型名，默认 "default"
+	Prompt      string        `yaml:"prompt"`      // 探测 prompt，默认 "hi"
+	MaxTokens   int           `yaml:"maxTokens"`   // 探测最大生成 token 数，默认 64
+	RepeatLimit int           `yaml:"repeatLimit"` // 连续重复 token 判定异常的阈值，默认 20
+	Timeout     time.Duration `yaml:"timeout"`     // 探测超时时间，默认 5s
+}
+
+func (g *ProbeGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
+type Config struct {
+	Host           string        `yaml:"host"`
+	Port           int           `yaml:"port"`
+	Backend        string        `yaml:"backend"`
+	StartupCommand string        `yaml:"startupCommand"`
+	Restart        *RestartGroup `yaml:"restart"`
+	Probe          *ProbeGroup   `yaml:"probe"`
+}
+
+// restartInterval 重启分组的空闲阈值
+func restartInterval(cfg Config) time.Duration {
+	if cfg.Restart.Enabled() && cfg.Restart.Interval > 0 {
+		return cfg.Restart.Interval
+	}
+	return defaultInterval
+}
+
+// probeInterval 探测分组的空闲阈值
+func probeInterval(cfg Config) time.Duration {
+	if cfg.Probe.Enabled() && cfg.Probe.Interval > 0 {
+		return cfg.Probe.Interval
+	}
+	return defaultInterval
+}
+
+func loadConfig(path string) (Config, error) {
+	var cfg Config
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return cfg, fmt.Errorf("读取配置: %w", err)
 	}
-	return yaml.Unmarshal(data, out)
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("解析配置: %w", err)
+	}
+	if cfg.Backend == "" {
+		return cfg, fmt.Errorf("配置缺少 backend")
+	}
+	return cfg, nil
+}
+
+func secretMask(s string) string {
+	if s == "" {
+		return "(empty)"
+	}
+	if len(s) <= 4 {
+		return "****"
+	}
+	return "****" + s[len(s)-4:]
 }
