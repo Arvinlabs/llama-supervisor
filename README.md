@@ -3,7 +3,7 @@
 Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断重置计时，`restart` 与 `probe` 两组功能相互独立，各自通过 `enable` 开关启用或关闭（可都关闭，此时仅做反向代理）：
 
 - `probe.enable: true`：空闲达到 `probe.interval` 秒后，下一个请求 proxy 前先探测后端 llama server，流式过程中末尾字符持续重复则判定异常，执行 `probe.command` 再 proxy
-- `restart.enable: true`：空闲达到 `restart.interval` 秒后，下一个请求直接执行 `restart.command` 再 proxy
+- `restart.enable: true`：独立后台检查，空闲达到 `restart.interval` 秒后直接执行 `restart.command`，无需等待请求
 
 ## 功能
 
@@ -12,7 +12,6 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
   - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`：
     - 流式过程中末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
-    - probe 实际执行了 command 时（后端已重启），restart 的空闲计时随之重置，且同一请求内不重复执行 restart.command
   - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），空闲达到 `restart.interval`（距最后一次请求/活跃）即执行 `restart.command`，无需等待请求，可周期性重复；每次请求都会重置空闲计时
 - 执行 command（probe 或 restart）后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发
 - 可选（`startupCommand`）启动时同步执行一次命令
@@ -63,28 +62,3 @@ cp config.yaml.example config.yaml
 | `probe.maxTokens` | 探测最大生成 token 数，默认 `64` |
 | `probe.repeatLimit` | 生成内容末尾同一字符连续出现达到该长度即判定异常，默认 `20` |
 | `probe.timeout` | 探测超时(秒)，默认 `5` |
-
-## 配置示例
-
-```yaml
-host: "0.0.0.0"
-port: 8080
-backend: "http://127.0.0.1:8081"
-startupCommand: "sudo /usr/bin/supervisorctl start llama"
-
-restart:
-  enable: true
-  interval: 20
-  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
-
-probe:
-  enable: true
-  interval: 60
-  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
-  apiKey: ""
-  model: "default"
-  prompt: "hi"
-  maxTokens: 64
-  repeatLimit: 20
-  timeout: 5
-```
