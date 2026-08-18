@@ -39,12 +39,13 @@ func (g *ProbeGroup) Enabled() bool {
 }
 
 type Config struct {
-	Host           string        `yaml:"host"`
-	Port           int           `yaml:"port"`
-	Backend        string        `yaml:"backend"`
-	StartupCommand string        `yaml:"startupCommand"`
-	Restart        *RestartGroup `yaml:"restart"`
-	Probe          *ProbeGroup   `yaml:"probe"`
+	Host             string        `yaml:"host"`
+	Port             int           `yaml:"port"`
+	Backend          string        `yaml:"backend"`
+	StartupCommand   string        `yaml:"startupCommand"`
+	WaitBackendReady int           `yaml:"waitBackendReady"` // 执行 command 后端口就绪后再等多少秒才转发，默认 0
+	Restart          *RestartGroup `yaml:"restart"`
+	Probe            *ProbeGroup   `yaml:"probe"`
 }
 
 // restartInterval 重启分组的空闲阈值（配置为秒）

@@ -58,4 +58,3 @@ func (t *idleTracker) reset() {
 	defer t.mu.Unlock()
 	t.deadline = time.Now().Add(t.interval)
 }
-

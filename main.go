@@ -22,7 +22,8 @@ var cfgPath = flag.String("config", "config.yaml", "配置文件路径")
 type proxy struct {
 	proxy       *httputil.ReverseProxy
 	backendURL  string
-	backendAddr string // backend 的 host:port（启动时校验必须显式带端口）
+	backendAddr string        // backend 的 host:port（启动时校验必须显式带端口）
+	readyDelay  time.Duration // 执行 command 后端口就绪后再等这么久才转发
 
 	restart *restartPolicy // 重启策略（restart 未启用时为 nil）
 	probe   *probePolicy   // 探测策略（probe 未启用时为 nil）
@@ -41,6 +42,7 @@ func newBackendProxy(cfg Config) *proxy {
 		proxy:       httputil.NewSingleHostReverseProxy(backend),
 		backendURL:  cfg.Backend,
 		backendAddr: backend.Host,
+		readyDelay:  time.Duration(cfg.WaitBackendReady) * time.Second,
 	}
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy %s %s: %v", r.Method, r.URL.Path, err)
@@ -122,6 +124,15 @@ func (p *proxy) waitBackendReady(ctx context.Context) {
 		conn, err := net.DialTimeout("tcp", p.backendAddr, 2*time.Second)
 		if err == nil {
 			conn.Close()
+			if p.readyDelay > 0 {
+				log.Printf("[proxy] backend ready, waiting %s before forwarding", p.readyDelay)
+				select {
+				case <-time.After(p.readyDelay):
+				case <-ctx.Done():
+					log.Printf("[proxy] wait canceled: %v", ctx.Err())
+					return
+				}
+			}
 			log.Printf("[proxy] backend ready")
 			return
 		}
