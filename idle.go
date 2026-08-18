@@ -51,10 +51,3 @@ func (t *idleTracker) consumeIdle(ctx context.Context) bool {
 	}
 	return t.onIdle(ctx)
 }
-
-// reset 重置空闲计时
-func (t *idleTracker) reset() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.deadline = time.Now().Add(t.interval)
-}

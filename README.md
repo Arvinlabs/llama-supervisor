@@ -13,8 +13,8 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
     - 流式过程中末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
     - probe 实际执行了 command 时（后端已重启），restart 的空闲计时随之重置，且同一请求内不重复执行 restart.command
-  - `restart`（`enable: true` 时启用）：空闲达到 `restart.interval` 后，下一个请求到来时执行 `restart.command`，再 proxy
-- 请求触发 command 执行后，等待后端端口可连接（每 0.5s 探测一次，请求取消则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发该请求
+  - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），空闲达到 `restart.interval`（距最后一次请求/活跃）即执行 `restart.command`，无需等待请求，可周期性重复；每次请求都会重置空闲计时
+- 执行 command（probe 或 restart）后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发
 - 可选（`startupCommand`）启动时同步执行一次命令
 - Ctrl+C / SIGTERM 优雅退出
 
