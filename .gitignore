@@ -1,0 +1,21 @@
+# 编译产物
+/llama-supervisor
+*.exe
+*.out
+
+# Go
+vendor/
+
+# 本地配置
+config.yaml
+
+# 临时/调试文件
+tmp/
+*.log
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
