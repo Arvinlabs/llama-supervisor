@@ -174,12 +174,6 @@ func main() {
 	// 创建代理
 	sup := newBackendProxy(cfg)
 
-	// 启动后先探测一次
-	if sup.probe != nil {
-		log.Print("[startup] probing backend...")
-		sup.probe.runProbe(ctx)
-	}
-
 	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		log.Fatalf("listen %s:%d failed: %v", cfg.Host, cfg.Port, err)
