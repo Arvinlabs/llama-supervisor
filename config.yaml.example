@@ -11,7 +11,7 @@ startupCommand: "sudo /usr/bin/supervisorctl start llama"
 # ===== restart 重启配置：enable 为 true 时启用 =====
 restart:
   enable: true
-  # 空闲多久(秒)触发，默认 600s
+  # 空闲多久(秒)触发，默认 600
   interval: 300
   # 执行的命令
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
@@ -19,7 +19,7 @@ restart:
 # ===== probe 后端探测配置：enable 为 true 时启用 =====
 probe:
   enable: true
-  # 空闲多久(秒)触发，默认 600s
+  # 空闲多久(秒)触发，默认 600
   interval: 600
   # 探测判定异常后执行的命令
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
@@ -33,5 +33,5 @@ probe:
   maxTokens: 64
   # 连续重复 token 判定异常阈值，默认 20
   repeatLimit: 20
-  # 探测超时，默认 5s
-  timeout: 5s
+  # 探测超时(秒)，默认 5
+  timeout: 5

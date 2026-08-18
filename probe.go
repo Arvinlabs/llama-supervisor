@@ -45,7 +45,7 @@ func buildProbeConfig(g *ProbeGroup) probeConfig {
 		pc.repeatLimit = g.RepeatLimit
 	}
 	if g.Timeout > 0 {
-		pc.timeout = g.Timeout
+		pc.timeout = time.Duration(g.Timeout) * time.Second
 	}
 	return pc
 }
@@ -174,7 +174,7 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 				run = 1
 			}
 			if run >= pc.repeatLimit {
-				return false, fmt.Errorf("内容退化: 连续 %d 个重复字符 %q", run, lastChar)
+				return false, fmt.Errorf("degenerate content: %d consecutive repeated char %q", run, lastChar)
 			}
 		}
 	}

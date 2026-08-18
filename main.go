@@ -75,9 +75,12 @@ func (p *proxy) stop(ctx context.Context) {
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	// probe 与 restart 的 command 不在同一请求内都执行：
-	// probe 本次实际执行了 command 则跳过 restart（restart 下次请求仍会正常触发）；
+	// probe 本次实际执行了 command（后端已重启）则跳过 restart 并重置其计时；
 	// probe 探测正常未执行 command 时，restart 照常触发
 	if p.probe != nil && p.probe.consumeIdle(ctx) {
+		if p.restart != nil {
+			p.restart.reset()
+		}
 		p.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -120,15 +123,15 @@ func main() {
 	defer stopSignal()
 
 	if cfg.Restart.Enabled() {
-		log.Printf("[config] restart enabled: interval=%s command=%q",
-			restartInterval(cfg), cfg.Restart.Command)
+		log.Printf("[config] restart enabled: interval=%ds command=%q",
+			int(restartInterval(cfg).Seconds()), cfg.Restart.Command)
 	} else {
 		log.Print("[config] restart disabled")
 	}
 	if cfg.Probe.Enabled() {
 		pc := buildProbeConfig(cfg.Probe)
-		log.Printf("[config] probe enabled: interval=%s command=%q model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%s apiKey=%q",
-			probeInterval(cfg), cfg.Probe.Command, pc.model, pc.prompt, pc.maxTokens, pc.repeatLimit, pc.timeout, secretMask(pc.apiKey))
+		log.Printf("[config] probe enabled: interval=%ds command=%q model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%ds apiKey=%q",
+			int(probeInterval(cfg).Seconds()), cfg.Probe.Command, pc.model, pc.prompt, pc.maxTokens, pc.repeatLimit, int(pc.timeout.Seconds()), secretMask(pc.apiKey))
 	} else {
 		log.Print("[config] probe disabled")
 	}

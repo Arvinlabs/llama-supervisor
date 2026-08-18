@@ -52,6 +52,12 @@ func (t *idleTracker) consumeIdle(ctx context.Context) bool {
 	return ran
 }
 
+// reset 重置空闲计时（并清除触发标记，允许下次再触发）
+func (t *idleTracker) reset() {
+	t.deadline = time.Now().Add(t.idleTime)
+	t.consumed = false
+}
+
 // stop 优雅停止时若已跨越空闲超时则触发 onIdle（触发过则不再重复）
 func (t *idleTracker) stop(ctx context.Context) bool {
 	if t.consumed || t.deadline.IsZero() || time.Now().Before(t.deadline) {

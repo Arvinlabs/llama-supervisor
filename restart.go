@@ -30,3 +30,8 @@ func (r *restartPolicy) consumeIdle(ctx context.Context) bool {
 func (r *restartPolicy) stop(ctx context.Context) bool {
 	return r.tracker.stop(ctx)
 }
+
+// reset 重置空闲计时（如 probe 已执行过 command 时调用）
+func (r *restartPolicy) reset() {
+	r.tracker.reset()
+}

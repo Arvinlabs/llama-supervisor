@@ -12,6 +12,7 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
   - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`：
     - 流式过程中末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
+    - probe 实际执行了 command 时（后端已重启），restart 的空闲计时随之重置，且同一请求内不重复执行 restart.command
   - `restart`（`enable: true` 时启用）：空闲达到 `restart.interval` 后，下一个请求到来时执行 `restart.command`，再 proxy
 - 可选（`startupCommand`）启动时同步执行一次命令
 - Ctrl+C / SIGTERM 优雅退出
@@ -59,7 +60,7 @@ cp config.yaml.example config.yaml
 | `probe.prompt` | 探测提示词，默认 `hi` |
 | `probe.maxTokens` | 探测最大生成 token 数，默认 `64` |
 | `probe.repeatLimit` | 生成内容末尾同一字符连续出现达到该长度即判定异常，默认 `20` |
-| `probe.timeout` | 探测超时，默认 `5s` |
+| `probe.timeout` | 探测超时(秒)，默认 `5` |
 
 ## 配置示例
 
@@ -83,5 +84,5 @@ probe:
   prompt: "hi"
   maxTokens: 64
   repeatLimit: 20
-  timeout: 5s
+  timeout: 5
 ```
