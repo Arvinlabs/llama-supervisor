@@ -52,14 +52,18 @@ func buildProbeConfig(g *ProbeGroup) probeConfig {
 
 // probePolicy 探测策略：空闲超时则探测后端，判定异常则执行 probe.command
 type probePolicy struct {
+	// ctx 服务器级 ctx（退出信号驱动），探测与命令执行不跟随用户请求的 ctx，
+	// 避免用户提前断开连接导致探测被取消而误判异常
+	ctx     context.Context
 	tracker *idleTracker
 	cmd     string
 	backend string
 	probe   probeConfig
 }
 
-func newProbePolicy(backend string, g *ProbeGroup, interval time.Duration) *probePolicy {
+func newProbePolicy(ctx context.Context, backend string, g *ProbeGroup, interval time.Duration) *probePolicy {
 	p := &probePolicy{
+		ctx:     ctx,
 		cmd:     g.Command,
 		backend: backend,
 		probe:   buildProbeConfig(g),
@@ -74,8 +78,9 @@ func (p *probePolicy) onHTTPRequest() {
 	p.tracker.onHTTPRequest()
 }
 
-func (p *probePolicy) consumeIdle(ctx context.Context) bool {
-	return p.tracker.consumeIdle(ctx)
+func (p *probePolicy) consumeIdle(_ context.Context) bool {
+	// 传入的 ctx 是用户请求 ctx，探测不继承它，改用服务器级 ctx
+	return p.tracker.consumeIdle(p.ctx)
 }
 
 // runProbe 探测后端，异常则执行 probe.command，返回是否实际执行了命令

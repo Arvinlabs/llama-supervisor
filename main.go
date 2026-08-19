@@ -29,8 +29,8 @@ type proxy struct {
 	probe   *probePolicy   // 探测策略（probe 未启用时为 nil）
 }
 
-// newBackendProxy 创建到后端的反向代理
-func newBackendProxy(cfg Config) *proxy {
+// newBackendProxy 创建到后端的反向代理，ctx 为服务器级 ctx（probe 探测不跟随用户请求）
+func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	backend, err := url.Parse(cfg.Backend)
 	if err != nil {
 		log.Fatalf("backend %q: %v", cfg.Backend, err)
@@ -56,7 +56,7 @@ func newBackendProxy(cfg Config) *proxy {
 		p.restart = newRestartPolicy(cfg.Restart, restartInterval(cfg))
 	}
 	if cfg.Probe.Enabled() {
-		p.probe = newProbePolicy(cfg.Backend, cfg.Probe, probeInterval(cfg))
+		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg))
 	}
 	if p.restart == nil && p.probe == nil {
 		log.Print("[config] restart and probe both disabled, proxying only")
@@ -215,7 +215,7 @@ func main() {
 	}
 
 	// 创建代理并启动 restart 后台空闲检查
-	sup := newBackendProxy(cfg)
+	sup := newBackendProxy(cfg, ctx)
 	sup.startBackground(ctx)
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))

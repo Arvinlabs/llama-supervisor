@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -144,4 +145,31 @@ func TestProbeBackend(t *testing.T) {
 			t.Fatalf("expected unhealthy, got healthy=%v err=%v", healthy, err)
 		}
 	})
+}
+
+// 用户请求 ctx 取消（提前断开连接）时，probe 策略改用服务器级 ctx，探测仍应正常执行
+func TestProbePolicySurvivesRequestCtxCancel(t *testing.T) {
+	got := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sseStream([2]string{"", "ok"})))
+	}))
+	defer srv.Close()
+
+	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour)
+	// 强制空闲到期
+	p.tracker.mu.Lock()
+	p.tracker.deadline = time.Now().Add(-time.Second)
+	p.tracker.mu.Unlock()
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	cancel() // 模拟用户提前断开
+	healthy := p.consumeIdle(reqCtx)
+	if !got {
+		t.Fatal("probe should still run after user request ctx canceled")
+	}
+	if healthy {
+		t.Fatal("healthy backend should not trigger command")
+	}
 }
