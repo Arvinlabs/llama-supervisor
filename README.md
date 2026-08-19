@@ -3,7 +3,7 @@
 Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断重置计时，`restart` 与 `probe` 两组功能相互独立，各自通过 `enable` 开关启用或关闭（可都关闭，此时仅做反向代理）：
 
 - `probe.enable: true`：空闲达到 `probe.interval` 秒后，下一个请求 proxy 前先探测后端 llama server，流式过程中末尾字符持续重复则判定异常，执行 `probe.command` 再 proxy
-- `restart.enable: true`：独立后台检查，空闲达到 `restart.interval` 秒后直接执行 `restart.command`，无需等待请求
+- `restart.enable: true`：独立后台检查，首次请求后开始计时，请求不断则时间窗口延展，空闲达到 `restart.interval` 秒后直接执行 `restart.command`，无需等待请求；触发重启后暂停计时，无请求不计时，再次有请求才重新计时
 
 ## 功能
 
@@ -12,7 +12,7 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
   - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`：
     - 流式过程中 `reasoning_content` 与 `content` 分别独立判定，任一末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
-  - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），空闲达到 `restart.interval`（距最后一次请求/活跃）即执行 `restart.command`，无需等待请求，可周期性重复；每次请求都会重置空闲计时
+  - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），计时从服务启动后的第一次请求开始（此前无请求不计时），每次请求都会延展空闲时间窗口，空闲达到 `restart.interval`（距最后一次请求）即执行 `restart.command`，无需等待请求；触发后暂停计时，再次有请求时重新开始计时，可周期性重复
 - probe 判定异常执行 command 后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发（restart 触发时不等待，直接执行命令）
 - 可选（`startupCommand`）启动时同步执行一次命令
 - Ctrl+C / SIGTERM 优雅退出
