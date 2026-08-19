@@ -6,13 +6,19 @@ import (
 	"time"
 )
 
-// 惰性计时：首次请求前不计时，首次请求后才开始计时
+// 惰性计时：首次请求前不计时，即使挂钟时间超过时间窗口也不应触发
 func TestLazyIdleTrackerNotActiveBeforeFirstRequest(t *testing.T) {
-	lt := newLazyIdleTracker(time.Hour, func(ctx context.Context) bool {
-		t.Fatal("should not trigger before first request")
+	trig := 0
+	lt := newLazyIdleTracker(50*time.Millisecond, func(ctx context.Context) bool {
+		trig++
 		return true
 	})
+	// 无任何请求，远超时间窗口
+	time.Sleep(120 * time.Millisecond)
 	lt.consumeIdle(t.Context())
+	if trig != 0 {
+		t.Fatalf("timer must not have started before first request, got %d triggers", trig)
+	}
 }
 
 func TestLazyIdleTrackerLifecycle(t *testing.T) {
