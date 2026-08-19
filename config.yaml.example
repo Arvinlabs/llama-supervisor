@@ -34,7 +34,9 @@ probe:
   prompt: "hi"
   # 探测最大生成 token 数，默认 64
   maxTokens: 64
-  # 连续重复 token 判定异常阈值，默认 20
-  repeatLimit: 20
+  # 连续重复字符判定异常阈值，默认 10
+  repeatLimit: 10
+  # 正常内容累计达到该字符数即提前判定健康，不等生成结束，默认 20（设为负值禁用）
+  successLimit: 20
   # 探测超时(秒)，默认 5
   timeout: 5

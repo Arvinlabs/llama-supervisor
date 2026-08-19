@@ -23,15 +23,16 @@ func (g *RestartGroup) Enabled() bool {
 
 // ProbeGroup 探测配置：enable 为 true 表示启用
 type ProbeGroup struct {
-	Enable      bool   `yaml:"enable"`      // 是否启用
-	Interval    int    `yaml:"interval"`    // 空闲多久(秒)触发，默认 600
-	Command     string `yaml:"command"`     // 探测判定异常后执行的命令
-	ApiKey      string `yaml:"apiKey"`      // 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
-	Model       string `yaml:"model"`       // 探测模型名，默认 "default"
-	Prompt      string `yaml:"prompt"`      // 探测 prompt，默认 "hi"
-	MaxTokens   int    `yaml:"maxTokens"`   // 探测最大生成 token 数，默认 64
-	RepeatLimit int    `yaml:"repeatLimit"` // 连续重复 token 判定异常的阈值，默认 20
-	Timeout     int    `yaml:"timeout"`     // 探测超时(秒)，默认 5
+	Enable       bool   `yaml:"enable"`       // 是否启用
+	Interval     int    `yaml:"interval"`     // 空闲多久(秒)触发，默认 600
+	Command      string `yaml:"command"`      // 探测判定异常后执行的命令
+	ApiKey       string `yaml:"apiKey"`       // 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
+	Model        string `yaml:"model"`        // 探测模型名，默认 "default"
+	Prompt       string `yaml:"prompt"`       // 探测 prompt，默认 "hi"
+	MaxTokens    int    `yaml:"maxTokens"`    // 探测最大生成 token 数，默认 64
+	RepeatLimit  int    `yaml:"repeatLimit"`  // 连续重复字符判定异常的阈值，默认 10
+	SuccessLimit int    `yaml:"successLimit"` // 正常内容累计达到该字符数即提前判定健康，默认 20
+	Timeout      int    `yaml:"timeout"`      // 探测超时(秒)，默认 5
 }
 
 func (g *ProbeGroup) Enabled() bool {

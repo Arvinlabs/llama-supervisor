@@ -11,6 +11,7 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
 - 两个相互独立的空闲计时器（probe 从服务启动开始计时，restart 从首次请求开始计时），计时中每收到请求都延展时间窗口：
   - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`（探测使用服务器级 ctx，用户请求断开不影响探测结果）：
     - 流式过程中 `reasoning_content` 与 `content` 分别独立判定，任一末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
+    - 内容正常且累计生成字符达到 `probe.successLimit` 时立即判定健康、提前结束探测，不等待 `maxTokens` 生成完成
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
   - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），计时从服务启动后的第一次请求开始（此前无请求不计时），每次请求都会延展空闲时间窗口，空闲达到 `restart.interval`（距最后一次请求）即执行 `restart.command`，无需等待请求；触发后暂停计时，再次有请求时重新开始计时，可周期性重复
 - probe 判定异常执行 command 后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发（restart 触发时不等待，直接执行命令）
@@ -60,5 +61,6 @@ cp config.yaml.example config.yaml
 | `probe.model` | 探测请求使用的 model，默认 `default` |
 | `probe.prompt` | 探测提示词，默认 `hi` |
 | `probe.maxTokens` | 探测最大生成 token 数，默认 `64` |
-| `probe.repeatLimit` | 生成内容（含 `reasoning_content`）末尾同一字符连续出现达到该长度即判定异常，默认 `20` |
+| `probe.repeatLimit` | 生成内容（含 `reasoning_content`）末尾同一字符连续出现达到该长度即判定异常，默认 `10` |
+| `probe.successLimit` | 生成内容累计达到该字符数且无异常时提前判定健康、立即结束探测，无需等待生成完成，默认 `20`（设为负值禁用） |
 | `probe.timeout` | 探测超时(秒)，默认 `5` |

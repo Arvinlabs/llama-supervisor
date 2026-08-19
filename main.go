@@ -202,8 +202,8 @@ func main() {
 	}
 	if cfg.Probe.Enabled() {
 		pc := buildProbeConfig(cfg.Probe)
-		log.Printf("[config] probe enabled: interval=%ds model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%ds apiKey=%q",
-			int(probeInterval(cfg).Seconds()), pc.model, pc.prompt, pc.maxTokens, pc.repeatLimit, int(pc.timeout.Seconds()), secretMask(pc.apiKey))
+		log.Printf("[config] probe enabled: interval=%ds model=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds apiKey=%q",
+			int(probeInterval(cfg).Seconds()), pc.model, pc.maxTokens, pc.repeatLimit, pc.successLimit, int(pc.timeout.Seconds()), secretMask(pc.apiKey))
 		log.Print("[config] probe command: " + cfg.Probe.Command)
 	} else {
 		log.Print("[config] probe disabled")

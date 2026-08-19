@@ -14,23 +14,25 @@ import (
 )
 
 type probeConfig struct {
-	apiKey      string
-	model       string
-	prompt      string
-	maxTokens   int
-	repeatLimit int
-	timeout     time.Duration
+	apiKey       string
+	model        string
+	prompt       string
+	maxTokens    int
+	repeatLimit  int
+	successLimit int // 正常内容累计达到该字符数即提前判定健康，不等待生成结束；0 表示禁用
+	timeout      time.Duration
 }
 
 // buildProbeConfig 从探测分组构建实际探测参数（补默认值）
 func buildProbeConfig(g *ProbeGroup) probeConfig {
 	pc := probeConfig{
-		apiKey:      g.ApiKey,
-		model:       "default",
-		prompt:      "hi",
-		maxTokens:   64,
-		repeatLimit: 20,
-		timeout:     5 * time.Second,
+		apiKey:       g.ApiKey,
+		model:        "default",
+		prompt:       "hi",
+		maxTokens:    64,
+		repeatLimit:  10,
+		successLimit: 20,
+		timeout:      5 * time.Second,
 	}
 	if g.Model != "" {
 		pc.model = g.Model
@@ -44,8 +46,17 @@ func buildProbeConfig(g *ProbeGroup) probeConfig {
 	if g.RepeatLimit > 0 {
 		pc.repeatLimit = g.RepeatLimit
 	}
+	if g.SuccessLimit > 0 {
+		pc.successLimit = g.SuccessLimit
+	} else if g.SuccessLimit < 0 {
+		pc.successLimit = 0 // 负值表示禁用提前成功
+	}
 	if g.Timeout > 0 {
 		pc.timeout = time.Duration(g.Timeout) * time.Second
+	}
+	// 提前成功阈值不小于重复阈值，保证退化流先被判异常而不是提前判健康
+	if pc.successLimit > 0 && pc.successLimit < pc.repeatLimit {
+		pc.successLimit = pc.repeatLimit
 	}
 	return pc
 }
@@ -85,8 +96,8 @@ func (p *probePolicy) consumeIdle(_ context.Context) bool {
 
 // runProbe 探测后端，异常则执行 probe.command，返回是否实际执行了命令
 func (p *probePolicy) runProbe(ctx context.Context) bool {
-	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d timeout=%ds",
-		p.backend, p.probe.model, p.probe.prompt, p.probe.maxTokens, p.probe.repeatLimit, int(p.probe.timeout.Seconds()))
+	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds",
+		p.backend, p.probe.model, p.probe.prompt, p.probe.maxTokens, p.probe.repeatLimit, p.probe.successLimit, int(p.probe.timeout.Seconds()))
 	healthy, err := probeBackend(ctx, p.backend, p.probe)
 	if healthy {
 		log.Print("[probe] backend looks healthy")
@@ -179,6 +190,7 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 
 	reasoningCheck := &repeatChecker{limit: pc.repeatLimit}
 	contentCheck := &repeatChecker{limit: pc.repeatLimit}
+	totalLen := 0 // 累计正常生成字符数（reasoning_content + content）
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -202,6 +214,11 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 		}
 		if ok, err := contentCheck.check("content", delta.Content); !ok {
 			return false, err
+		}
+		totalLen += len(delta.ReasoningContent) + len(delta.Content)
+		// 提前成功：内容正常且累计达到 successLimit，无需等待生成结束
+		if pc.successLimit > 0 && totalLen >= pc.successLimit {
+			return true, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {

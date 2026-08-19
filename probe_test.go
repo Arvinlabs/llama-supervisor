@@ -11,7 +11,7 @@ import (
 
 func TestBuildProbeConfigDefaults(t *testing.T) {
 	pc := buildProbeConfig(&ProbeGroup{Enable: true, Interval: 30, Command: "cmd"})
-	if pc.model != "default" || pc.prompt != "hi" || pc.maxTokens != 64 || pc.repeatLimit != 20 || pc.timeout != 5*time.Second {
+	if pc.model != "default" || pc.prompt != "hi" || pc.maxTokens != 64 || pc.repeatLimit != 10 || pc.successLimit != 20 || pc.timeout != 5*time.Second {
 		t.Fatalf("unexpected defaults: %+v", pc)
 	}
 }
@@ -19,10 +19,21 @@ func TestBuildProbeConfigDefaults(t *testing.T) {
 func TestBuildProbeConfigOverrides(t *testing.T) {
 	pc := buildProbeConfig(&ProbeGroup{
 		Enable: true, Interval: 30, Command: "cmd",
-		ApiKey: "k", Model: "m", Prompt: "p", MaxTokens: 10, RepeatLimit: 5, Timeout: 1,
+		ApiKey: "k", Model: "m", Prompt: "p", MaxTokens: 10, RepeatLimit: 5, SuccessLimit: 8, Timeout: 1,
 	})
-	if pc.apiKey != "k" || pc.model != "m" || pc.prompt != "p" || pc.maxTokens != 10 || pc.repeatLimit != 5 || pc.timeout != time.Second {
+	if pc.apiKey != "k" || pc.model != "m" || pc.prompt != "p" || pc.maxTokens != 10 || pc.repeatLimit != 5 || pc.successLimit != 8 || pc.timeout != time.Second {
 		t.Fatalf("unexpected overrides: %+v", pc)
+	}
+}
+
+func TestBuildProbeConfigClampsAndDisablesSuccessLimit(t *testing.T) {
+	// successLimit 小于 repeatLimit 时提升到 repeatLimit，避免退化流被提前判健康
+	if pc := buildProbeConfig(&ProbeGroup{RepeatLimit: 20, SuccessLimit: 5}); pc.successLimit != 20 {
+		t.Fatalf("expected clamp to repeatLimit, got %+v", pc)
+	}
+	// 负值禁用提前成功
+	if pc := buildProbeConfig(&ProbeGroup{SuccessLimit: -1}); pc.successLimit != 0 {
+		t.Fatalf("expected disabled, got %+v", pc)
 	}
 }
 
@@ -145,6 +156,42 @@ func TestProbeBackend(t *testing.T) {
 			t.Fatalf("expected unhealthy, got healthy=%v err=%v", healthy, err)
 		}
 	})
+}
+
+// 提前成功：累计正常内容达到 successLimit 后立即返回健康，不等待 [DONE]/生成结束
+func TestProbeBackendEarlySuccess(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"hello world, this is a normal answer"}}]}` + "\n\n"))
+		fl.Flush()
+		<-release // 后端持续"生成"，永远不结束
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	pc := probeConfig{repeatLimit: 20, successLimit: 16, timeout: 2 * time.Second}
+	start := time.Now()
+	healthy, err := probeBackend(t.Context(), srv.URL, pc)
+	if !healthy || err != nil {
+		t.Fatalf("expected healthy, got healthy=%v err=%v", healthy, err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("expected early success, took %v", d)
+	}
+}
+
+// 提前成功不会掩盖退化：32 字符达到 successLimit，但连续 'a' 已达 repeatLimit
+func TestProbeBackendStreamingEarlySuccessNotMaskDegenerate(t *testing.T) {
+	var pairs [][2]string
+	for i := 0; i < 4; i++ {
+		pairs = append(pairs, [2]string{"", "aaaaaaaa"})
+	}
+	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), probeConfig{repeatLimit: 20, successLimit: 32})
+	if healthy || err == nil {
+		t.Fatalf("expected unhealthy, got healthy=%v err=%v", healthy, err)
+	}
 }
 
 // 用户请求 ctx 取消（提前断开连接）时，probe 策略改用服务器级 ctx，探测仍应正常执行
