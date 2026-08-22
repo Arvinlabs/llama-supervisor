@@ -14,7 +14,7 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
     - 内容正常且累计生成字符达到 `probe.successLimit` 时立即判定健康、提前结束探测，不等待 `maxTokens` 生成完成
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
   - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），计时从服务启动后的第一次请求开始（此前无请求不计时），每次请求都会延展空闲时间窗口，空闲达到 `restart.interval`（距最后一次请求）即执行 `restart.command`，无需等待请求；触发后暂停计时，再次有请求时重新开始计时，可周期性重复
-- probe 判定异常执行 command 后，等待后端端口可连接（每 0.5s 探测一次，进程退出则立即返回）；若配置了 `waitBackendReady`，端口就绪后再等指定秒数才转发（restart 触发时不等待，直接执行命令）
+- probe 判定异常执行 command 后，轮询后端 `/health` 直到返回 2xx 才转发（每 0.5s 探测一次，进程退出则立即返回；restart 触发时不等待，直接执行命令）
 - 可选（`startupCommand`）启动时同步执行一次命令
 - Ctrl+C / SIGTERM 优雅退出
 
@@ -38,7 +38,6 @@ cp config.yaml.example config.yaml
 | `host` / `port` | 监听地址 |
 | `backend` | 后端地址，如 `http://127.0.0.1:8081` |
 | `startupCommand` | 启动时同步执行的命令(shell) |
-| `waitBackendReady` | probe 执行 command 后端口就绪后再等多少秒才转发，默认 `0`（秒） |
 | `restart` | 重启配置对象，`enable: true` 时启用，见下表 |
 | `probe` | 后端探测配置对象，`enable: true` 时启用，见下表 |
 

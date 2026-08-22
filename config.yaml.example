@@ -8,9 +8,6 @@ backend: "http://127.0.0.1:8081"
 # 启动命令
 startupCommand: "sudo /usr/bin/supervisorctl start llama"
 
-# probe 执行 command 后端口就绪后再等多少秒才转发，默认 0
-waitBackendReady: 0
-
 # ===== restart 重启配置：enable 为 true 时启用 =====
 restart:
   enable: true

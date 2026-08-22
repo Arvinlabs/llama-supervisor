@@ -44,7 +44,6 @@ type Config struct {
 	Port             int           `yaml:"port"`
 	Backend          string        `yaml:"backend"`
 	StartupCommand   string        `yaml:"startupCommand"`
-	WaitBackendReady int           `yaml:"waitBackendReady"` // 执行 command 后端口就绪后再等多少秒才转发，默认 0
 	Restart          *RestartGroup `yaml:"restart"`
 	Probe            *ProbeGroup   `yaml:"probe"`
 }

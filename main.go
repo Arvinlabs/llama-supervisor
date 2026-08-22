@@ -22,8 +22,7 @@ var cfgPath = flag.String("config", "config.yaml", "配置文件路径")
 type proxy struct {
 	proxy       *httputil.ReverseProxy
 	backendURL  string
-	backendAddr string        // backend 的 host:port（启动时校验必须显式带端口）
-	readyDelay  time.Duration // 执行 command 后端口就绪后再等这么久才转发
+	backendAddr string // backend 的 host:port（启动时校验必须显式带端口）
 
 	restart *restartPolicy // 重启策略（restart 未启用时为 nil）
 	probe   *probePolicy   // 探测策略（probe 未启用时为 nil）
@@ -45,7 +44,6 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 		proxy:       rp,
 		backendURL:  cfg.Backend,
 		backendAddr: backend.Host,
-		readyDelay:  time.Duration(cfg.WaitBackendReady) * time.Second,
 	}
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("proxy %s %s: %v", r.Method, r.URL.Path, err)
@@ -133,23 +131,22 @@ func logAccess(status int, r *http.Request, start time.Time) {
 	log.Printf("[access] %s %s %s %d %s", r.RemoteAddr, r.Method, r.URL.RequestURI(), status, time.Since(start).Round(time.Microsecond))
 }
 
-// waitBackendReady 执行 command 后等待后端端口可连接，再转发请求
+// waitBackendReady 执行 command 后轮询后端 /health，直到服务真正就绪（返回 2xx）才转发请求
 func (p *proxy) waitBackendReady(ctx context.Context) {
 	log.Printf("[proxy] waiting for backend %s to be ready", p.backendAddr)
+	client := &http.Client{Timeout: 5 * time.Second}
 	for {
-		conn, err := net.DialTimeout("tcp", p.backendAddr, 2*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.backendURL+"/health", nil)
+		ok := false
 		if err == nil {
-			conn.Close()
-			if p.readyDelay > 0 {
-				log.Printf("[proxy] backend ready, waiting %s before forwarding", p.readyDelay)
-				select {
-				case <-time.After(p.readyDelay):
-				case <-ctx.Done():
-					log.Printf("[proxy] wait canceled: %v", ctx.Err())
-					return
-				}
+			resp, err := client.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				ok = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 			}
-			log.Printf("[proxy] backend ready")
+		}
+		if ok {
+			log.Print("[proxy] backend ready")
 			return
 		}
 		select {
