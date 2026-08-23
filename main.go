@@ -24,8 +24,9 @@ type proxy struct {
 	backendURL  string
 	backendAddr string // backend 的 host:port（启动时校验必须显式带端口）
 
-	restart *restartPolicy // 重启策略（restart 未启用时为 nil）
-	probe   *probePolicy   // 探测策略（probe 未启用时为 nil）
+	restart  *restartPolicy  // 重启策略（restart 未启用时为 nil）
+	probe    *probePolicy    // 探测策略（probe 未启用时为 nil）
+	watchdog *watchdogPolicy // 看门狗策略（watchdog 未启用时为 nil）
 }
 
 // newBackendProxy 创建到后端的反向代理，ctx 为服务器级 ctx（probe 探测不跟随用户请求）
@@ -56,8 +57,11 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	if cfg.Probe.Enabled() {
 		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg))
 	}
-	if p.restart == nil && p.probe == nil {
-		log.Print("[config] restart and probe both disabled, proxying only")
+	if cfg.Watchdog.Enabled() {
+		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend)
+	}
+	if p.restart == nil && p.probe == nil && p.watchdog == nil {
+		log.Print("[config] restart, probe and watchdog all disabled, proxying only")
 	}
 	return p
 }
@@ -103,24 +107,38 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logAccess(rec.status, r, start)
 }
 
-// startBackground 启动 restart 的独立后台空闲检查：
-// 每秒检查一次，空闲到期则执行 restart.command，可周期性重复
+// startBackground 启动后台检查：
+// restart 每秒检查一次，空闲到期则执行 restart.command，可周期性重复；
+// watchdog 按配置间隔频繁采样 /slots，速度持续超过上限则执行 watchdog.command
 func (p *proxy) startBackground(ctx context.Context) {
-	if p.restart == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				p.restart.consumeIdle(ctx)
+	if p.restart != nil {
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					p.restart.consumeIdle(ctx)
+				}
 			}
-		}
-	}()
+		}()
+	}
+	if p.watchdog != nil {
+		go func() {
+			ticker := time.NewTicker(p.watchdog.config.interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					p.watchdog.tick(ctx)
+				}
+			}
+		}()
+	}
 }
 
 // logAccess 记录一行访问日志：客户端、方法、路径、状态码、耗时
@@ -204,6 +222,14 @@ func main() {
 		log.Print("[config] probe command: " + cfg.Probe.Command)
 	} else {
 		log.Print("[config] probe disabled")
+	}
+	if cfg.Watchdog.Enabled() {
+		wc := buildWatchdogConfig(cfg.Watchdog)
+		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d",
+			int(wc.interval.Seconds()), wc.maxRate, wc.times)
+		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
+	} else {
+		log.Print("[config] watchdog disabled")
 	}
 
 	// 启动命令

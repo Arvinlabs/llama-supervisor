@@ -1,6 +1,6 @@
 # llama-supervisor
 
-Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断重置计时，`restart` 与 `probe` 两组功能相互独立，各自通过 `enable` 开关启用或关闭（可都关闭，此时仅做反向代理）：
+Go 反向代理 + 空闲健康探测 + 异常重启 + 速度看门狗。请求活跃期间不断重置计时，`restart`、`probe`、`watchdog` 三组功能相互独立，各自通过 `enable` 开关启用或关闭（可都关闭，此时仅做反向代理）：
 
 - `probe.enable: true`：空闲达到 `probe.interval` 秒后，下一个请求 proxy 前先探测后端 llama server，流式过程中末尾字符持续重复则判定异常，执行 `probe.command` 再 proxy
 - `restart.enable: true`：独立后台检查，首次请求后开始计时，请求不断则时间窗口延展，空闲达到 `restart.interval` 秒后直接执行 `restart.command`，无需等待请求；触发重启后暂停计时，无请求不计时，再次有请求才重新计时
@@ -14,6 +14,7 @@ Go 反向代理 + 空闲健康探测 + 异常重启。请求活跃期间不断�
     - 内容正常且累计生成字符达到 `probe.successLimit` 时立即判定健康、提前结束探测，不等待 `maxTokens` 生成完成
     - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
   - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），计时从服务启动后的第一次请求开始（此前无请求不计时），每次请求都会延展空闲时间窗口，空闲达到 `restart.interval`（距最后一次请求）即执行 `restart.command`，无需等待请求；触发后暂停计时，再次有请求时重新开始计时，可周期性重复
+- `watchdog`（`enable: true` 时启用）：独立后台按 `watchdog.interval`（默认 3s）频繁采样后端 `/slots`（llama.cpp），采样间隔内生成速度超过 `watchdog.maxRate` t/s（默认 200）累计 `watchdog.times` 次（默认 1，连续采样）则判定后端大概率输出死循环（如 `//////`），执行 `watchdog.command`；速度回落则计数清零，触发后暂停一次采样再恢复
 - probe 判定异常执行 command 后，轮询后端 `/health` 直到返回 2xx 才转发（每 0.5s 探测一次，进程退出则立即返回；restart 触发时不等待，直接执行命令）
 - 可选（`startupCommand`）启动时同步执行一次命令
 - Ctrl+C / SIGTERM 优雅退出
@@ -40,6 +41,7 @@ cp config.yaml.example config.yaml
 | `startupCommand` | 启动时同步执行的命令(shell) |
 | `restart` | 重启配置对象，`enable: true` 时启用，见下表 |
 | `probe` | 后端探测配置对象，`enable: true` 时启用，见下表 |
+| `watchdog` | 速度看门狗配置对象，`enable: true` 时启用，见下表 |
 
 **restart（重启）**
 
@@ -63,3 +65,13 @@ cp config.yaml.example config.yaml
 | `probe.repeatLimit` | 生成内容（含 `reasoning_content`）末尾同一字符连续出现达到该长度即判定异常，默认 `10` |
 | `probe.successLimit` | 生成内容累计达到该字符数且无异常时提前判定健康、立即结束探测，无需等待生成完成，默认 `20`（设为负值禁用） |
 | `probe.timeout` | 探测超时(秒)，默认 `5` |
+
+**watchdog（速度看门狗）**
+
+| 字段 | 说明 |
+|---|---|
+| `watchdog.enable` | 是否启用，默认 `false` |
+| `watchdog.interval` | 采样 `/slots` 间隔(秒)，默认 `2`（频繁采样，及时发现） |
+| `watchdog.maxRate` | 生成速度上限(t/s)，采样间隔内平均速度超过该值判定一次超速，默认 `200` |
+| `watchdog.times` | 连续超速几次判异常并执行 command，默认 `2` |
+| `watchdog.command` | 判定异常后执行的命令(shell)，如重启 llama |

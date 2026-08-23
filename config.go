@@ -39,13 +39,27 @@ func (g *ProbeGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// WatchdogGroup 看门狗配置：enable 为 true 表示启用
+type WatchdogGroup struct {
+	Enable   bool    `yaml:"enable"`   // 是否启用
+	Interval int     `yaml:"interval"` // 采样间隔(秒)，默认 3
+	MaxRate  float64 `yaml:"maxRate"`  // 生成速度上限(t/s)，超过则判异常（死循环），默认 200
+	Times    int     `yaml:"times"`    // 连续超速几次判异常，默认 1
+	Command  string  `yaml:"command"`  // 判定异常后执行的命令(shell)
+}
+
+func (g *WatchdogGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
 type Config struct {
-	Host             string        `yaml:"host"`
-	Port             int           `yaml:"port"`
-	Backend          string        `yaml:"backend"`
-	StartupCommand   string        `yaml:"startupCommand"`
-	Restart          *RestartGroup `yaml:"restart"`
-	Probe            *ProbeGroup   `yaml:"probe"`
+	Host           string         `yaml:"host"`
+	Port           int            `yaml:"port"`
+	Backend        string         `yaml:"backend"`
+	StartupCommand string         `yaml:"startupCommand"`
+	Restart        *RestartGroup  `yaml:"restart"`
+	Probe          *ProbeGroup    `yaml:"probe"`
+	Watchdog       *WatchdogGroup `yaml:"watchdog"`
 }
 
 // restartInterval 重启分组的空闲阈值（配置为秒）

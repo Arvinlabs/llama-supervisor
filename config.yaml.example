@@ -37,3 +37,15 @@ probe:
   successLimit: 20
   # 探测超时(秒)，默认 5
   timeout: 5
+
+# ===== watchdog 速度看门狗配置：enable 为 true 时启用 =====
+watchdog:
+  enable: true
+  # 采样 /slots 间隔(秒)，默认 2
+  interval: 2
+  # 生成速度上限(t/s)，超过则判异常（死循环），默认 200
+  maxRate: 200
+  # 连续超速几次判异常，默认 2
+  times: 2
+  # 判定异常后执行的命令
+  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
