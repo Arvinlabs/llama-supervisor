@@ -44,7 +44,8 @@ func (s *slotsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.processing.Load() {
 		proc = "true"
 	}
-	w.Write([]byte(`[{"id":1,"is_processing":` + proc + `,"n_decoded":` + strconv.FormatInt(s.nDecoded.Load(), 10) + `}]`))
+	// 对齐真实 /slots 响应：n_decoded 位于 next_token[] 内
+	w.Write([]byte(`[{"id":1,"is_processing":` + proc + `,"next_token":[{"n_decoded":` + strconv.FormatInt(s.nDecoded.Load(), 10) + `}]}]`))
 }
 
 // 默认 times=2：单次超速不触发，连续两次超速才触发（进入 paused）
@@ -157,6 +158,54 @@ func TestWatchdogTickIdle(t *testing.T) {
 	p.tick(t.Context())
 	if p.paused {
 		t.Fatal("idle backend should not trigger")
+	}
+}
+
+// apiKey 非空时采样请求携带 Bearer <key>，为空则不携带
+func TestFetchSlotsApiKey(t *testing.T) {
+	var got atomic.Value
+	h := &slotsHandler{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("Authorization"))
+		h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	if _, err := fetchSlots(t.Context(), srv.URL, "secret-key"); err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Load(); v != "Bearer secret-key" {
+		t.Fatalf("unexpected Authorization header: %v", v)
+	}
+	if _, err := fetchSlots(t.Context(), srv.URL, ""); err != nil {
+		t.Fatal(err)
+	}
+	if v := got.Load(); v != "" {
+		t.Fatalf("expected no Authorization header, got: %v", v)
+	}
+}
+
+// 真实 /slots 响应结构：部分槽位无 next_token 字段，n_decoded 需从 next_token[] 聚合
+func TestFetchSlotsRealShape(t *testing.T) {
+	body := `[
+	  {"id": 0, "n_ctx": 163840, "speculative": true, "is_processing": false},
+	  {"id": 1, "n_ctx": 163840, "speculative": true, "is_processing": true,
+	   "id_task": 3849, "n_prompt_tokens": 4181,
+	   "params": {"temperature": 1, "max_tokens": -1},
+	   "next_token": [{"has_next_token": true, "has_new_line": false, "n_remain": -1, "n_decoded": 123}]}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	st, err := fetchSlots(t.Context(), srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.processing || st.nDecoded != 123 {
+		t.Fatalf("unexpected state: %+v", st)
 	}
 }
 

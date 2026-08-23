@@ -43,6 +43,8 @@ watchdog:
   enable: true
   # 采样 /slots 间隔(秒)，默认 2
   interval: 2
+  # 后端 api key（采样 /slots 时携带 Bearer <key>，正常代理不使用），默认空（不携带）
+  apiKey: ""
   # 生成速度上限(t/s)，超过则判异常（死循环），默认 200
   maxRate: 200
   # 连续超速几次判异常，默认 2

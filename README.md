@@ -72,6 +72,7 @@ cp config.yaml.example config.yaml
 |---|---|
 | `watchdog.enable` | 是否启用，默认 `false` |
 | `watchdog.interval` | 采样 `/slots` 间隔(秒)，默认 `2`（频繁采样，及时发现） |
+| `watchdog.apiKey` | 后端 api key，采样 `/slots` 时携带 `Bearer <key>`（正常代理不使用），默认空 |
 | `watchdog.maxRate` | 生成速度上限(t/s)，采样间隔内平均速度超过该值判定一次超速，默认 `200` |
 | `watchdog.times` | 连续超速几次判异常并执行 command，默认 `2` |
 | `watchdog.command` | 判定异常后执行的命令(shell)，如重启 llama |

@@ -60,6 +60,7 @@ type watchdogPolicy struct {
 	mu       sync.Mutex
 	config   watchdogConfig
 	backend  string
+	apiKey   string // 采样 /slots 时携带的 Bearer api key（空则不携带）
 	prev     watchdogState
 	wedges   int
 	paused   bool
@@ -71,13 +72,14 @@ func newWatchdogPolicy(g *WatchdogGroup, backend string) *watchdogPolicy {
 	return &watchdogPolicy{
 		config:  buildWatchdogConfig(g),
 		backend: backend,
+		apiKey:  g.ApiKey,
 	}
 }
 
 // tick 一次采样：拉取 /slots，与上次采样比较，连续 times 次超速才执行 command，
 // 避免单次突发误触发；执行后暂停一次采样（重启中），下次采样重新开始判定
 func (w *watchdogPolicy) tick(ctx context.Context) {
-	state, err := fetchSlots(ctx, w.backend)
+	state, err := fetchSlots(ctx, w.backend, w.apiKey)
 	if err != nil {
 		if msg := err.Error(); msg != w.lastFail {
 			log.Printf("[watchdog] fetch /slots failed: %v", err)
@@ -129,19 +131,27 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 	runCommand(ctx, "watchdog", w.config.command)
 }
 
-// slotInfo /slots 响应中用到的字段（llama.cpp）
-type slotInfo struct {
-	IsProcessing bool `json:"is_processing"`
-	NDecoded     int  `json:"n_decoded"`
+// slotNextToken /slots 响应中槽位 next_token[] 元素用到的字段（llama.cpp）
+type slotNextToken struct {
+	NDecoded int `json:"n_decoded"` // 槽位已生成 token 数
 }
 
-// fetchSlots 拉取后端 /slots，聚合出 watchdogState
-func fetchSlots(ctx context.Context, backend string) (watchdogState, error) {
+// slotInfo /slots 响应中用到的字段（llama.cpp）
+type slotInfo struct {
+	IsProcessing bool            `json:"is_processing"`
+	NextToken    []slotNextToken `json:"next_token"`
+}
+
+// fetchSlots 拉取后端 /slots，聚合出 watchdogState；apiKey 非空时携带 Bearer <key>
+func fetchSlots(ctx context.Context, backend, apiKey string) (watchdogState, error) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, backend+"/slots", nil)
 	if err != nil {
 		return watchdogState{}, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -158,7 +168,9 @@ func fetchSlots(ctx context.Context, backend string) (watchdogState, error) {
 	}
 	st := watchdogState{}
 	for _, s := range slots {
-		st.nDecoded += s.NDecoded
+		for _, t := range s.NextToken {
+			st.nDecoded += t.NDecoded
+		}
 		if s.IsProcessing {
 			st.processing = true
 		}

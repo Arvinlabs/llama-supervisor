@@ -42,7 +42,8 @@ func (g *ProbeGroup) Enabled() bool {
 // WatchdogGroup 看门狗配置：enable 为 true 表示启用
 type WatchdogGroup struct {
 	Enable   bool    `yaml:"enable"`   // 是否启用
-	Interval int     `yaml:"interval"` // 采样间隔(秒)，默认 3
+	Interval int     `yaml:"interval"` // 采样间隔(秒)，默认 2
+	ApiKey   string  `yaml:"apiKey"`   // 后端 api key（采样 /slots 时携带 Bearer <key>，正常代理不使用）
 	MaxRate  float64 `yaml:"maxRate"`  // 生成速度上限(t/s)，超过则判异常（死循环），默认 200
 	Times    int     `yaml:"times"`    // 连续超速几次判异常，默认 1
 	Command  string  `yaml:"command"`  // 判定异常后执行的命令(shell)
