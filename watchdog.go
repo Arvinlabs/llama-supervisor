@@ -17,6 +17,7 @@ type watchdogConfig struct {
 	maxRate  float64       // 生成速度上限(t/s)，超过则判异常
 	times    int           // 连续超速几次判异常，默认 2
 	command  string        // 判定异常后执行的命令(shell)
+	verbose  bool          // 是否打印测速正常日志（有请求且速度正常时 info），默认 false
 }
 
 // buildWatchdogConfig 从看门狗配置分组构建实际参数（补默认值）
@@ -26,6 +27,7 @@ func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
 		maxRate:  200,
 		times:    2,
 		command:  g.Command,
+		verbose:  g.Verbose,
 	}
 	if g.Interval > 0 {
 		wc.interval = time.Duration(g.Interval) * time.Second
@@ -105,6 +107,12 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 		w.mu.Lock()
 		w.wedges = 0
 		w.mu.Unlock()
+		// verbose 开启且有生成请求、上次也在生成时 info 一次探测到的速度（首次窗口无有效速度，不打日志）
+		if w.config.verbose && state.processing && prev.processing {
+			rate := float64(state.nDecoded-prev.nDecoded) / w.config.interval.Seconds()
+			log.Printf("[watchdog] ok: n_decoded %d -> %d (%.0f t/s <= maxRate %gt/s)",
+				prev.nDecoded, state.nDecoded, rate, w.config.maxRate)
+		}
 		return
 	}
 

@@ -221,14 +221,14 @@ func TestWatchdogTickFetchFail(t *testing.T) {
 
 func TestBuildWatchdogConfigDefaults(t *testing.T) {
 	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true})
-	if wc.interval != 2*time.Second || wc.maxRate != 200 || wc.times != 2 || wc.command != "" {
+	if wc.interval != 2*time.Second || wc.maxRate != 200 || wc.times != 2 || wc.command != "" || wc.verbose {
 		t.Fatalf("unexpected defaults: %+v", wc)
 	}
 }
 
 func TestBuildWatchdogConfigOverrides(t *testing.T) {
-	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true, Interval: 5, MaxRate: 500, Times: 3, Command: "cmd"})
-	if wc.interval != 5*time.Second || wc.maxRate != 500 || wc.times != 3 || wc.command != "cmd" {
+	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true, Interval: 5, MaxRate: 500, Times: 3, Command: "cmd", Verbose: true})
+	if wc.interval != 5*time.Second || wc.maxRate != 500 || wc.times != 3 || wc.command != "cmd" || !wc.verbose {
 		t.Fatalf("unexpected overrides: %+v", wc)
 	}
 }

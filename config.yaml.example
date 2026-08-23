@@ -49,5 +49,7 @@ watchdog:
   maxRate: 200
   # 连续超速几次判异常，默认 2
   times: 2
+  # 是否打印测速正常日志（有请求且速度正常时 info），默认 false
+  verbose: false
   # 判定异常后执行的命令
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
