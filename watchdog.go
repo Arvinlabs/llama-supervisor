@@ -89,6 +89,11 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 			log.Printf("[watchdog] fetch /slots failed: %v", err)
 			w.lastFail = msg
 		}
+		// a failed sample breaks the streak: the next over-speed sample cannot be
+		// consecutive with an earlier one, so reset the consecutive counter
+		w.mu.Lock()
+		w.wedges = 0
+		w.mu.Unlock()
 		return
 	}
 	w.lastFail = ""

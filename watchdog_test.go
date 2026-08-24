@@ -219,6 +219,17 @@ func TestWatchdogTickFetchFail(t *testing.T) {
 	}
 }
 
+// a /slots fetch failure breaks the over-speed streak: later non-consecutive fast samples must not trigger
+func TestWatchdogTickFetchFailResetsStreak(t *testing.T) {
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, "http://127.0.0.1:1", "")
+	p.prev = watchdogState{processing: true, nDecoded: 100}
+	p.wedges = 1 // previous sample was over speed, 1/2
+	p.tick(t.Context()) // fetch fails: streak broken
+	if p.wedges != 0 {
+		t.Fatalf("expected streak reset on fetch failure, got wedges=%d", p.wedges)
+	}
+}
+
 func TestBuildWatchdogConfigDefaults(t *testing.T) {
 	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true})
 	if wc.interval != 2*time.Second || wc.maxRate != 200 || wc.times != 2 || wc.command != "" || wc.verbose {

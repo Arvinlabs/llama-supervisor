@@ -1,4 +1,4 @@
-module llama-supervisor
+module github.com/Arvinlabs/llama-supervisor
 
 go 1.25.11
 
