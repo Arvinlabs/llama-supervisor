@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -41,13 +43,27 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	rp := httputil.NewSingleHostReverseProxy(backend)
 	// FlushInterval=0：每次 Write 后立即 flush，SSE/流式输出无缓冲直达客户端
 	rp.FlushInterval = 0
+	// 客户端断开（请求 ctx 取消）时主动关闭后端响应体：
+	// Go 的 HTTP/1.1 响应体读不受请求 ctx 控制，否则代理会一直阻塞在后端流式读取上，后端持续生成
+	rp.ModifyResponse = func(res *http.Response) error {
+		cb := &ctxBody{ctx: res.Request.Context(), rc: res.Body, quit: make(chan struct{})}
+		res.Body = cb
+		cb.watch()
+		return nil
+	}
 	p := &proxy{
 		proxy:       rp,
 		backendURL:  cfg.Backend,
 		backendAddr: backend.Host,
 	}
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("proxy %s %s: %v", r.Method, r.URL.Path, err)
+		if cerr := r.Context().Err(); cerr != nil {
+			// 客户端已断开（ctx 已取消）：后端请求已被提前终止，不按后端故障处理
+			log.Printf("[proxy] client disconnected, backend aborted: %s %s (%v)",
+				r.Method, r.URL.Path, err)
+		} else {
+			log.Printf("proxy %s %s: %v", r.Method, r.URL.Path, err)
+		}
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
 	}
 
@@ -93,6 +109,49 @@ func (s *statusRecorder) Flush() {
 	}
 }
 
+// ctxBody 包装后端响应体：ctx（客户端请求上下文）取消（客户端断开）时
+// 主动关闭底层 body，中断可能正阻塞的读取，使后端连接被提前终止。
+// Go 的 HTTP/1.1 客户端读响应体不受请求 ctx 控制（仅 http2 自动中断），
+// 不处理的话客户端断开后代理仍会等后端流式读完，后端持续空跑
+type ctxBody struct {
+	ctx  context.Context
+	rc   io.ReadCloser
+	quit chan struct{}
+	once sync.Once
+}
+
+func (b *ctxBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return b.rc.Read(p)
+}
+
+func (b *ctxBody) Close() error {
+	b.once.Do(func() {
+		close(b.quit)
+		// 未读完即 Close：http 客户端会关闭该 TCP 连接（而非归还连接池），
+		// 后端因此感知到客户端断开，停止处理当前请求
+		_ = b.rc.Close()
+	})
+	return nil
+}
+
+// watch 起一个伴随协程：ctx 取消（客户端断开）时打日志并 Close body；
+// 响应正常结束（Close）时退出，无泄漏。
+// 注意这里必须自己打日志：ReverseProxy 流式 copy 出错时不走 ErrorHandler，
+// 而是 panic(http.ErrAbortHandler) 由 server 静默 recover（Issue 23643）
+func (b *ctxBody) watch() {
+	go func() {
+		select {
+		case <-b.ctx.Done():
+			log.Printf("[proxy] client disconnected, aborting backend stream: %v", b.ctx.Err())
+			b.Close()
+		case <-b.quit:
+		}
+	}()
+}
+
 // ServeHTTP 请求到来时处理：probe 空闲超时则先探测（异常执行 command 并等后端就绪），然后转发，并记录 access log
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -103,6 +162,9 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.probe != nil && p.probe.consumeIdle(ctx) {
 		p.waitBackendReady(ctx)
 	}
+	// 客户端断开时：请求 ctx 取消 -> ctxBody 关闭后端连接 -> 后端读取被中断，
+	// copyResponse 出错走 ErrorHandler 打出 "[proxy] client disconnected, backend aborted"
+	// 注意不能在此处用 r.Context().Err() 判断开：net/http 在 handler 正常返回后也会取消 ctx，会误报
 	p.proxy.ServeHTTP(rec, r)
 	logAccess(rec.status, r, start)
 }
