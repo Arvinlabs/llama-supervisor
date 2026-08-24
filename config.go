@@ -10,44 +10,44 @@ import (
 
 const defaultInterval = 600 * time.Second
 
-// RestartGroup 重启配置：enable 为 true 表示启用
+// RestartGroup restart config; Enable true means enabled
 type RestartGroup struct {
-	Enable   bool   `yaml:"enable"`   // 是否启用
-	Interval int    `yaml:"interval"` // 空闲多久(秒)触发，默认 600
-	Command  string `yaml:"command"`  // 超时后执行的命令
+	Enable   bool   `yaml:"enable"`   // whether enabled
+	Interval int    `yaml:"interval"` // idle seconds before triggering, default 600
+	Command  string `yaml:"command"`  // command run on timeout
 }
 
 func (g *RestartGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
-// ProbeGroup 探测配置：enable 为 true 表示启用
+// ProbeGroup probe config; Enable true means enabled
 type ProbeGroup struct {
-	Enable       bool   `yaml:"enable"`       // 是否启用
-	Interval     int    `yaml:"interval"`     // 空闲多久(秒)触发，默认 600
-	Command      string `yaml:"command"`      // 探测判定异常后执行的命令
-	ApiKey       string `yaml:"apiKey"`       // 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
-	Model        string `yaml:"model"`        // 探测模型名，默认 "default"
-	Prompt       string `yaml:"prompt"`       // 探测 prompt，默认 "hi"
-	MaxTokens    int    `yaml:"maxTokens"`    // 探测最大生成 token 数，默认 64
-	RepeatLimit  int    `yaml:"repeatLimit"`  // 连续重复字符判定异常的阈值，默认 10
-	SuccessLimit int    `yaml:"successLimit"` // 正常内容累计达到该字符数即提前判定健康，默认 20
-	Timeout      int    `yaml:"timeout"`      // 探测超时(秒)，默认 5
+	Enable       bool   `yaml:"enable"`       // whether enabled
+	Interval     int    `yaml:"interval"`     // idle seconds before triggering, default 600
+	Command      string `yaml:"command"`      // command run after the probe declares unhealthy
+	ApiKey       string `yaml:"apiKey"`       // probe API key (sent as Bearer <key> only on probe requests, not used by normal proxying)
+	Model        string `yaml:"model"`        // probe model name, default "default"
+	Prompt       string `yaml:"prompt"`       // probe prompt, default "hi"
+	MaxTokens    int    `yaml:"maxTokens"`    // max generated tokens for the probe, default 64
+	RepeatLimit  int    `yaml:"repeatLimit"`  // repeated-tail threshold for declaring unhealthy, default 10
+	SuccessLimit int    `yaml:"successLimit"` // normal content reaching this many cumulative characters is declared healthy early, default 20
+	Timeout      int    `yaml:"timeout"`      // probe timeout in seconds, default 5
 }
 
 func (g *ProbeGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
-// WatchdogGroup 看门狗配置：enable 为 true 表示启用
+// WatchdogGroup watchdog config; Enable true means enabled
 type WatchdogGroup struct {
-	Enable   bool    `yaml:"enable"`   // 是否启用
-	Interval int     `yaml:"interval"` // 采样间隔(秒)，默认 2
-	ApiKey   string  `yaml:"apiKey"`   // 后端 api key（采样 /slots 时携带 Bearer <key>，正常代理不使用）
-	Verbose  bool    `yaml:"verbose"`  // 是否打印测速正常日志（有请求且速度正常时 info），默认 false
-	MaxRate  float64 `yaml:"maxRate"`  // 生成速度上限(t/s)，超过则判异常（死循环），默认 200
-	Times    int     `yaml:"times"`    // 连续超速几次判异常，默认 1
-	Command  string  `yaml:"command"`  // 判定异常后执行的命令(shell)
+	Enable   bool    `yaml:"enable"`   // whether enabled
+	Interval int     `yaml:"interval"` // sampling interval in seconds, default 2
+	ApiKey   string  `yaml:"apiKey"`   // backend API key (sent as Bearer <key> when sampling /slots, not used by normal proxying)
+	Verbose  bool    `yaml:"verbose"`  // whether to log the measured speed on normal windows, default false
+	MaxRate  float64 `yaml:"maxRate"`  // max generation speed (t/s); above it is declared unhealthy (output loop), default 200
+	Times    int     `yaml:"times"`    // consecutive over-speed samples required to declare unhealthy, default 1
+	Command  string  `yaml:"command"`  // shell command run after declaring unhealthy
 }
 
 func (g *WatchdogGroup) Enabled() bool {
@@ -64,7 +64,7 @@ type Config struct {
 	Watchdog       *WatchdogGroup `yaml:"watchdog"`
 }
 
-// restartInterval 重启分组的空闲阈值（配置为秒）
+// restartInterval returns the restart group's idle threshold (configured in seconds)
 func restartInterval(cfg Config) time.Duration {
 	if cfg.Restart.Enabled() && cfg.Restart.Interval > 0 {
 		return time.Duration(cfg.Restart.Interval) * time.Second
@@ -72,7 +72,7 @@ func restartInterval(cfg Config) time.Duration {
 	return defaultInterval
 }
 
-// probeInterval 探测分组的空闲阈值（配置为秒）
+// probeInterval returns the probe group's idle threshold (configured in seconds)
 func probeInterval(cfg Config) time.Duration {
 	if cfg.Probe.Enabled() && cfg.Probe.Interval > 0 {
 		return time.Duration(cfg.Probe.Interval) * time.Second

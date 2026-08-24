@@ -6,19 +6,19 @@ import (
 	"time"
 )
 
-// idleTracker 空闲状态跟踪器
+// idleTracker tracks idle state
 type idleTracker struct {
 	mu       sync.Mutex
 	interval time.Duration
 	deadline time.Time
-	active   bool // lazy 模式：是否已处于计时中
-	lazy     bool // 首次请求后才开始计时；触发后暂停，待下次请求再计时
-	// onIdle 空闲超时回调，返回本次是否实际执行了命令
+	active   bool // lazy mode: whether timing is in progress
+	lazy     bool // timing starts only after the first request; paused after a trigger until the next request
+	// onIdle is the idle timeout callback; it returns whether a command was actually run
 	onIdle func(ctx context.Context) bool
 }
 
-// newIdleTracker 创建空闲计时器。计时从创建（服务启动）开始，
-// 每次空闲超时被请求跨越时触发 onIdle，可重复触发
+// newIdleTracker creates an idle timer. Timing starts at creation (service startup);
+// onIdle is triggered each time the idle timeout is crossed by a request, and can trigger repeatedly
 func newIdleTracker(interval time.Duration, onIdle func(ctx context.Context) bool) *idleTracker {
 	return &idleTracker{
 		interval: interval,
@@ -28,8 +28,8 @@ func newIdleTracker(interval time.Duration, onIdle func(ctx context.Context) boo
 	}
 }
 
-// newLazyIdleTracker 创建惰性空闲计时器。首次请求后才开始计时；
-// 触发 onIdle 后暂停计时，无请求不计时，下次请求到来时重新开始计时
+// newLazyIdleTracker creates a lazy idle timer. Timing starts only after the first request;
+// after triggering onIdle the timer is paused (no timing without requests) and resumes when the next request arrives
 func newLazyIdleTracker(interval time.Duration, onIdle func(ctx context.Context) bool) *idleTracker {
 	return &idleTracker{
 		interval: interval,
@@ -39,7 +39,8 @@ func newLazyIdleTracker(interval time.Duration, onIdle func(ctx context.Context)
 	}
 }
 
-// onHTTPRequest 未计时时激活计时；计时中且未到期则不断延展时间窗口；空闲已到期则不重置，留给 consumeIdle 触发
+// onHTTPRequest activates timing when inactive; while timing and not yet due, it keeps extending the window;
+// when idle is already due it does not reset, leaving the trigger to consumeIdle
 func (t *idleTracker) onHTTPRequest() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -54,17 +55,17 @@ func (t *idleTracker) onHTTPRequest() {
 	}
 }
 
-// consumeIdle 请求到来时判断空闲超时是否被跨越，跨越则触发 onIdle，
-// 返回本次是否实际执行了命令
+// consumeIdle checks, when a request arrives, whether the idle timeout was crossed; if so it triggers onIdle
+// and returns whether a command was actually run this time
 func (t *idleTracker) consumeIdle(ctx context.Context) bool {
 	t.mu.Lock()
 	if !t.active || time.Now().Before(t.deadline) {
 		t.mu.Unlock()
 		return false
 	}
-	// 先重置再执行，避免执行期间并发请求重复触发
+	// reset before running to avoid concurrent requests during the run re-triggering
 	if t.lazy {
-		t.active = false // 触发后暂停计时，下次请求再开始
+		t.active = false // pause timing after a trigger; restart on the next request
 	} else {
 		t.deadline = time.Now().Add(t.interval)
 	}

@@ -18,20 +18,20 @@ import (
 	"time"
 )
 
-var cfgPath = flag.String("config", "config.yaml", "配置文件路径")
+var cfgPath = flag.String("config", "config.yaml", "path to the config file")
 
-// proxy 反向代理，附加空闲重启与探测逻辑
+// proxy is the reverse proxy with idle restart and probe logic attached
 type proxy struct {
 	proxy       *httputil.ReverseProxy
 	backendURL  string
-	backendAddr string // backend 的 host:port（启动时校验必须显式带端口）
+	backendAddr string // backend host:port (validated at startup, must carry an explicit port)
 
-	restart  *restartPolicy  // 重启策略（restart 未启用时为 nil）
-	probe    *probePolicy    // 探测策略（probe 未启用时为 nil）
-	watchdog *watchdogPolicy // 看门狗策略（watchdog 未启用时为 nil）
+	restart  *restartPolicy  // restart policy (nil when restart is disabled)
+	probe    *probePolicy    // probe policy (nil when probe is disabled)
+	watchdog *watchdogPolicy // watchdog policy (nil when watchdog is disabled)
 }
 
-// newBackendProxy 创建到后端的反向代理，ctx 为服务器级 ctx（probe 探测不跟随用户请求）
+// newBackendProxy creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
 func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	backend, err := url.Parse(cfg.Backend)
 	if err != nil {
@@ -41,10 +41,11 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 		log.Fatalf("backend %q: host and explicit port are required", cfg.Backend)
 	}
 	rp := httputil.NewSingleHostReverseProxy(backend)
-	// FlushInterval=0：每次 Write 后立即 flush，SSE/流式输出无缓冲直达客户端
+	// FlushInterval=0: flush after every Write so SSE/streaming output reaches the client unbuffered
 	rp.FlushInterval = 0
-	// 客户端断开（请求 ctx 取消）时主动关闭后端响应体：
-	// Go 的 HTTP/1.1 响应体读不受请求 ctx 控制，否则代理会一直阻塞在后端流式读取上，后端持续生成
+	// When the client disconnects (request ctx canceled), close the backend response body proactively:
+	// Go's HTTP/1.1 response body reads are not governed by the request ctx, otherwise the proxy
+	// would stay blocked on the backend stream read and the backend would keep generating
 	rp.ModifyResponse = func(res *http.Response) error {
 		cb := &ctxBody{ctx: res.Request.Context(), rc: res.Body, quit: make(chan struct{})}
 		res.Body = cb
@@ -58,7 +59,7 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	}
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		if cerr := r.Context().Err(); cerr != nil {
-			// 客户端已断开（ctx 已取消）：后端请求已被提前终止，不按后端故障处理
+			// The client already disconnected (ctx canceled): the backend request was aborted early, not a backend failure
 			log.Printf("[proxy] client disconnected, backend aborted: %s %s (%v)",
 				r.Method, r.URL.Path, err)
 		} else {
@@ -91,7 +92,7 @@ func (p *proxy) onHTTPRequest() {
 	}
 }
 
-// statusRecorder 包装 ResponseWriter，记录响应状态码用于 access log
+// statusRecorder wraps ResponseWriter to record the response status code for the access log
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -102,17 +103,19 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-// Flush 透传 flush：ReverseProxy 需要 ResponseWriter 实现 http.Flusher 才会按 FlushInterval 流式转发
+// Flush passes flush through: ReverseProxy only streams by FlushInterval when the ResponseWriter implements http.Flusher
 func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// ctxBody 包装后端响应体：ctx（客户端请求上下文）取消（客户端断开）时
-// 主动关闭底层 body，中断可能正阻塞的读取，使后端连接被提前终止。
-// Go 的 HTTP/1.1 客户端读响应体不受请求 ctx 控制（仅 http2 自动中断），
-// 不处理的话客户端断开后代理仍会等后端流式读完，后端持续空跑
+// ctxBody wraps the backend response body: when ctx (the client request context) is canceled
+// (client disconnected), the underlying body is closed proactively to interrupt a possibly
+// blocked read, so the backend connection is terminated early.
+// Go's HTTP/1.1 client response body reads are not governed by the request ctx (only http2
+// aborts automatically); without this, after a client disconnect the proxy would still wait
+// for the backend stream to finish and the backend would keep running idle
 type ctxBody struct {
 	ctx  context.Context
 	rc   io.ReadCloser
@@ -130,17 +133,18 @@ func (b *ctxBody) Read(p []byte) (int, error) {
 func (b *ctxBody) Close() error {
 	b.once.Do(func() {
 		close(b.quit)
-		// 未读完即 Close：http 客户端会关闭该 TCP 连接（而非归还连接池），
-		// 后端因此感知到客户端断开，停止处理当前请求
+		// Close before the body is fully read: the http client closes the TCP connection
+		// (instead of returning it to the pool), so the backend notices the disconnect
+		// and stops processing the current request
 		_ = b.rc.Close()
 	})
 	return nil
 }
 
-// watch 起一个伴随协程：ctx 取消（客户端断开）时打日志并 Close body；
-// 响应正常结束（Close）时退出，无泄漏。
-// 注意这里必须自己打日志：ReverseProxy 流式 copy 出错时不走 ErrorHandler，
-// 而是 panic(http.ErrAbortHandler) 由 server 静默 recover（Issue 23643）
+// watch starts a companion goroutine: on ctx cancel (client disconnect) log and Close the body;
+// on normal completion (Close) it exits, no leak.
+// Note: the log must be printed here, because a streaming copy error in ReverseProxy does not
+// go through ErrorHandler but panics with http.ErrAbortHandler, silently recovered by the server (Issue 23643)
 func (b *ctxBody) watch() {
 	go func() {
 		select {
@@ -152,26 +156,28 @@ func (b *ctxBody) watch() {
 	}()
 }
 
-// ServeHTTP 请求到来时处理：probe 空闲超时则先探测（异常执行 command 并等后端就绪），然后转发，并记录 access log
+// ServeHTTP handles an incoming request: if the probe idle timeout was crossed, probe first
+// (on unhealthy run the command and wait for the backend to be ready), then forward, and log the access
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w}
-	// probe 空闲超时：先探测，实际执行了 command（后端已重启）则等待后端就绪
-	// restart 计时无需手动重置：本次请求的 onHTTPRequest 已刷新
+	// probe idle timeout: probe first; if the command actually ran (backend restarted), wait for the backend to be ready.
+	// restart timing needs no manual reset: this request's onHTTPRequest already refreshed it
 	if p.probe != nil && p.probe.consumeIdle(ctx) {
 		p.waitBackendReady(ctx)
 	}
-	// 客户端断开时：请求 ctx 取消 -> ctxBody 关闭后端连接 -> 后端读取被中断，
-	// copyResponse 出错走 ErrorHandler 打出 "[proxy] client disconnected, backend aborted"
-	// 注意不能在此处用 r.Context().Err() 判断开：net/http 在 handler 正常返回后也会取消 ctx，会误报
+	// On client disconnect: the request ctx is canceled -> ctxBody closes the backend connection ->
+	// the backend read is interrupted, and "client disconnected" is logged from ctxBody/ErrorHandler.
+	// Note: r.Context().Err() must not be used here to detect this, because net/http also cancels
+	// the ctx after the handler returns normally, which would be a false positive
 	p.proxy.ServeHTTP(rec, r)
 	logAccess(rec.status, r, start)
 }
 
-// startBackground 启动后台检查：
-// restart 每秒检查一次，空闲到期则执行 restart.command，可周期性重复；
-// watchdog 按配置间隔频繁采样 /slots，速度持续超过上限则执行 watchdog.command
+// startBackground starts the background checkers:
+// restart checks once per second and runs restart.command when the idle deadline is crossed, periodically repeatable;
+// watchdog samples /slots at the configured interval and runs watchdog.command when the speed keeps exceeding the limit
 func (p *proxy) startBackground(ctx context.Context) {
 	if p.restart != nil {
 		go func() {
@@ -203,7 +209,7 @@ func (p *proxy) startBackground(ctx context.Context) {
 	}
 }
 
-// logAccess 记录一行访问日志：客户端、方法、路径、状态码、耗时
+// logAccess logs one access line: client, method, path, status code, elapsed time
 func logAccess(status int, r *http.Request, start time.Time) {
 	if status == 0 {
 		status = http.StatusOK
@@ -211,7 +217,7 @@ func logAccess(status int, r *http.Request, start time.Time) {
 	log.Printf("[access] %s %s %s %d %s", r.RemoteAddr, r.Method, r.URL.RequestURI(), status, time.Since(start).Round(time.Microsecond))
 }
 
-// waitBackendReady 执行 command 后轮询后端 /health，直到服务真正就绪（返回 2xx）才转发请求
+// waitBackendReady polls the backend /health after a command ran, until the service is truly ready (2xx) before forwarding
 func (p *proxy) waitBackendReady(ctx context.Context) {
 	log.Printf("[proxy] waiting for backend %s to be ready", p.backendAddr)
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -238,7 +244,7 @@ func (p *proxy) waitBackendReady(ctx context.Context) {
 	}
 }
 
-// runCommand 执行命令并等待完成，ctx 取消时终止命令
+// runCommand runs a command and waits for it to finish; the command is terminated when ctx is canceled
 func runCommand(ctx context.Context, label, cmdStr string) bool {
 	if cmdStr == "" {
 		return false
@@ -266,7 +272,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	// 根 ctx：signal 驱动，全局继承（启动命令、探测、请求上下文均源自它）
+	// Root ctx: signal-driven, inherited globally (startup command, probes and request contexts all derive from it)
 	ctx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
 
@@ -294,12 +300,12 @@ func main() {
 		log.Print("[config] watchdog disabled")
 	}
 
-	// 启动命令
+	// startup command
 	if cfg.StartupCommand != "" {
 		runCommand(ctx, "startup", cfg.StartupCommand)
 	}
 
-	// 创建代理并启动 restart 后台空闲检查
+	// create the proxy and start the restart background idle checker
 	sup := newBackendProxy(cfg, ctx)
 	sup.startBackground(ctx)
 
@@ -310,7 +316,7 @@ func main() {
 	log.Printf("supervisor listening on http://%s:%d -> %s", cfg.Host, cfg.Port, cfg.Backend)
 
 	srv := &http.Server{
-		// 请求上下文继承根 ctx
+		// request contexts inherit the root ctx
 		BaseContext: func(net.Listener) context.Context { return ctx },
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			sup.onHTTPRequest()
@@ -318,7 +324,7 @@ func main() {
 		}),
 	}
 
-	// 收到退出信号则关闭服务
+	// close the server on exit signal
 	go func() {
 		<-ctx.Done()
 		log.Print("received exit signal, shutting down")

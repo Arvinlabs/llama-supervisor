@@ -11,16 +11,16 @@ import (
 	"time"
 )
 
-// watchdogConfig 看门狗实际参数（补默认值后）
+// watchdogConfig effective watchdog parameters (defaults filled in)
 type watchdogConfig struct {
-	interval time.Duration // 采样间隔(秒)，默认 2（频繁采样，及时发现高速死循环）
-	maxRate  float64       // 生成速度上限(t/s)，超过则判异常
-	times    int           // 连续超速几次判异常，默认 2
-	command  string        // 判定异常后执行的命令(shell)
-	verbose  bool          // 是否打印测速正常日志（有请求且速度正常时 info），默认 false
+	interval time.Duration // sampling interval in seconds, default 2 (frequent sampling to catch fast output loops early)
+	maxRate  float64       // max generation speed (t/s); above it is declared unhealthy
+	times    int           // consecutive over-speed samples required to declare unhealthy, default 2
+	command  string        // shell command run after declaring unhealthy
+	verbose  bool          // whether to log the measured speed on normal windows, default false
 }
 
-// buildWatchdogConfig 从看门狗配置分组构建实际参数（补默认值）
+// buildWatchdogConfig builds the effective parameters from the watchdog config group (filling in defaults)
 func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
 	wc := watchdogConfig{
 		interval: 2 * time.Second,
@@ -41,14 +41,14 @@ func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
 	return wc
 }
 
-// watchdogState 一次 /slots 采样
+// watchdogState is one /slots sample
 type watchdogState struct {
-	processing bool // 是否有槽位在生成
-	nDecoded   int  // 所有槽位 n_decoded 总和
+	processing bool // whether any slot is generating
+	nDecoded   int  // sum of n_decoded over all slots
 }
 
-// decideFast 纯函数：前后两次采样间隔内平均生成速度超过 maxRate 则判异常
-// （llama 陷入 "////" 式死循环时 decode 速度会异常飙高）
+// decideFast pure function: flag unhealthy when the average generation speed between two samples exceeds maxRate
+// (when llama is stuck in a "////"-style output loop, the decode speed spikes abnormally)
 func decideFast(prev, cur watchdogState, elapsed time.Duration, maxRate float64) bool {
 	if !prev.processing {
 		return false
@@ -56,20 +56,21 @@ func decideFast(prev, cur watchdogState, elapsed time.Duration, maxRate float64)
 	return float64(cur.nDecoded-prev.nDecoded)/elapsed.Seconds() > maxRate
 }
 
-// watchdogPolicy 看门狗策略：频繁采样后端 /slots，生成速度持续超过阈值（大概率输出死循环）
-// 则执行 watchdog.command（类似 restart）；触发后暂停一次采样再恢复
+// watchdogPolicy watchdog strategy: sample the backend /slots frequently, and when the generation
+// speed keeps exceeding the threshold (very likely an output loop) run watchdog.command (similar to
+// restart); after a trigger one sample is skipped before resuming
 type watchdogPolicy struct {
 	mu       sync.Mutex
 	config   watchdogConfig
 	backend  string
-	apiKey   string // 采样 /slots 时携带的 Bearer api key（空则不携带）
+	apiKey   string // Bearer API key sent when sampling /slots (none when empty)
 	prev     watchdogState
 	wedges   int
 	paused   bool
-	lastFail string // 上次采样错误信息，仅变化时打日志
+	lastFail string // last fetch error message; only logged when it changes
 }
 
-// newWatchdogPolicy 创建看门狗策略
+// newWatchdogPolicy creates the watchdog policy
 func newWatchdogPolicy(g *WatchdogGroup, backend string) *watchdogPolicy {
 	return &watchdogPolicy{
 		config:  buildWatchdogConfig(g),
@@ -78,8 +79,9 @@ func newWatchdogPolicy(g *WatchdogGroup, backend string) *watchdogPolicy {
 	}
 }
 
-// tick 一次采样：拉取 /slots，与上次采样比较，连续 times 次超速才执行 command，
-// 避免单次突发误触发；执行后暂停一次采样（重启中），下次采样重新开始判定
+// tick performs one sample: fetch /slots, compare with the previous sample, and run the command
+// only after `times` consecutive over-speed samples to avoid a single burst triggering it;
+// after running, one sample is skipped (during restart) and the check restarts from the next sample
 func (w *watchdogPolicy) tick(ctx context.Context) {
 	state, err := fetchSlots(ctx, w.backend, w.apiKey)
 	if err != nil {
@@ -92,7 +94,7 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 	w.lastFail = ""
 
 	w.mu.Lock()
-	if w.paused { // 上次触发后跳过一次采样，重置基线
+	if w.paused { // skip one sample after the last trigger and reset the baseline
 		w.paused = false
 		w.wedges = 0
 		w.prev = state
@@ -107,7 +109,7 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 		w.mu.Lock()
 		w.wedges = 0
 		w.mu.Unlock()
-		// verbose 开启且有生成请求、上次也在生成时 info 一次探测到的速度（首次窗口无有效速度，不打日志）
+		// when verbose is on and a generation request is active in both windows, info-log the measured speed (the first window has no valid rate, no log)
 		if w.config.verbose && state.processing && prev.processing {
 			rate := float64(state.nDecoded-prev.nDecoded) / w.config.interval.Seconds()
 			log.Printf("[watchdog] ok: n_decoded %d -> %d (%.0f t/s <= maxRate %gt/s)",
@@ -139,18 +141,18 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 	runCommand(ctx, "watchdog", w.config.command)
 }
 
-// slotNextToken /slots 响应中槽位 next_token[] 元素用到的字段（llama.cpp）
+// slotNextToken is a field of slot next_token[] elements in the /slots response (llama.cpp)
 type slotNextToken struct {
-	NDecoded int `json:"n_decoded"` // 槽位已生成 token 数
+	NDecoded int `json:"n_decoded"` // tokens generated so far in the slot
 }
 
-// slotInfo /slots 响应中用到的字段（llama.cpp）
+// slotInfo is a field of the /slots response (llama.cpp)
 type slotInfo struct {
 	IsProcessing bool            `json:"is_processing"`
 	NextToken    []slotNextToken `json:"next_token"`
 }
 
-// fetchSlots 拉取后端 /slots，聚合出 watchdogState；apiKey 非空时携带 Bearer <key>
+// fetchSlots fetches the backend /slots and aggregates a watchdogState; when apiKey is non-empty, sends Bearer <key>
 func fetchSlots(ctx context.Context, backend, apiKey string) (watchdogState, error) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

@@ -1,79 +1,79 @@
 # llama-supervisor
 
-Go 反向代理 + 空闲健康探测 + 异常重启 + 速度看门狗。请求活跃期间不断重置计时，`restart`、`probe`、`watchdog` 三组功能相互独立，各自通过 `enable` 开关启用或关闭（可都关闭，此时仅做反向代理）：
+Go reverse proxy with idle health probing, automatic restart, and a speed watchdog. The idle timer keeps resetting while requests are active. `restart`, `probe`, and `watchdog` are three independent features, each toggled by its own `enable` switch (all can be disabled, in which case the process only reverse-proxies):
 
-- `probe.enable: true`：空闲达到 `probe.interval` 秒后，下一个请求 proxy 前先探测后端 llama server，流式过程中末尾字符持续重复则判定异常，执行 `probe.command` 再 proxy
-- `restart.enable: true`：独立后台检查，首次请求后开始计时，请求不断则时间窗口延展，空闲达到 `restart.interval` 秒后直接执行 `restart.command`，无需等待请求；触发重启后暂停计时，无请求不计时，再次有请求才重新计时
+- `probe.enable: true`: after being idle for `probe.interval` seconds, the next request triggers a probe of the backend llama server before proxying. If the tail characters keep repeating during streaming, the backend is considered unhealthy, `probe.command` runs, and then the request is proxied.
+- `restart.enable: true`: an independent background check. Timing starts after the first request; as long as requests keep coming the window extends. Once idle for `restart.interval` seconds, `restart.command` runs directly without waiting for a request. After a trigger, timing is paused: no requests means no timing, and a new request restarts the timer.
 
-## 功能
+## Features
 
-- 反向代理：`host:port` → `backend`
-- 两个相互独立的空闲计时器（probe 从服务启动开始计时，restart 从首次请求开始计时），计时中每收到请求都延展时间窗口：
-  - `probe`（`enable: true` 时启用）：空闲达到 `probe.interval` 后，下一个请求到来时在 proxy 之前先流式调用后端 `/v1/chat/completions`（探测使用服务器级 ctx，用户请求断开不影响探测结果）：
-    - 流式过程中 `reasoning_content` 与 `content` 分别独立判定，任一末尾字符持续重复（达到 `probe.repeatLimit`）即提前终止并判定 llama server 异常；探测失败同样判定异常
-    - 内容正常且累计生成字符达到 `probe.successLimit` 时立即判定健康、提前结束探测，不等待 `maxTokens` 生成完成
-    - 异常则执行 `probe.command`，执行完成后再 proxy；正常则直接 proxy
-  - `restart`（`enable: true` 时启用）：独立后台检查（每秒一次），计时从服务启动后的第一次请求开始（此前无请求不计时），每次请求都会延展空闲时间窗口，空闲达到 `restart.interval`（距最后一次请求）即执行 `restart.command`，无需等待请求；触发后暂停计时，再次有请求时重新开始计时，可周期性重复
-- `watchdog`（`enable: true` 时启用）：独立后台按 `watchdog.interval`（默认 3s）频繁采样后端 `/slots`（llama.cpp），采样间隔内生成速度超过 `watchdog.maxRate` t/s（默认 200）累计 `watchdog.times` 次（默认 1，连续采样）则判定后端大概率输出死循环（如 `//////`），执行 `watchdog.command`；速度回落则计数清零，触发后暂停一次采样再恢复
-- probe 判定异常执行 command 后，轮询后端 `/health` 直到返回 2xx 才转发（每 0.5s 探测一次，进程退出则立即返回；restart 触发时不等待，直接执行命令）
-- 可选（`startupCommand`）启动时同步执行一次命令
-- Ctrl+C / SIGTERM 优雅退出
+- Reverse proxy: `host:port` → `backend`
+- Two independent idle timers (probe starts counting from service startup, restart from the first request); every request during counting extends the idle window:
+  - `probe` (enabled with `enable: true`): once idle for `probe.interval`, when the next request arrives a streaming call to the backend `/v1/chat/completions` is made before proxying (the probe uses the server-level ctx, so a user request disconnect does not affect the probe result):
+    - during streaming, `reasoning_content` and `content` are checked independently; if the tail character of either keeps repeating (reaching `probe.repeatLimit`), the probe is aborted early and the llama server is declared unhealthy. A probe failure is also declared unhealthy.
+    - if the content is normal and the cumulative generated characters reach `probe.successLimit`, the backend is declared healthy immediately and the probe ends early, without waiting for `maxTokens` to finish.
+    - unhealthy: run `probe.command`, then proxy when it completes. Healthy: proxy directly.
+  - `restart` (enabled with `enable: true`): an independent background check (once per second). Timing starts from the first request after service startup (no timing before that); every request extends the idle window. Once idle for `restart.interval` (measured from the last request), `restart.command` runs without waiting for a request. After a trigger timing is paused, resumes when a new request arrives, and can repeat periodically.
+- `watchdog` (enabled with `enable: true`): an independent background sampler that polls the backend `/slots` (llama.cpp) every `watchdog.interval` (default 2s). If the generation speed within a sample interval exceeds `watchdog.maxRate` t/s (default 200) for `watchdog.times` consecutive samples (default 2), the backend is assumed to be stuck in an output loop (e.g. `//////`) and `watchdog.command` runs. The counter is reset when the speed drops back; after a trigger one sample is skipped before resuming.
+- After a probe declares unhealthy and the command runs, the backend `/health` is polled every 0.5s until it returns 2xx before forwarding (returns immediately if the probe process exits; a restart trigger does not wait and runs its command directly).
+- Optional startup command (`startupCommand`) run synchronously once at boot.
+- Graceful shutdown on Ctrl+C / SIGTERM.
 
-## 构建与运行
+## Build & Run
 
 ```bash
 make build
-./llama-supervisor -config config.yaml   # 默认 ./config.yaml
+./llama-supervisor -config config.yaml   # default: ./config.yaml
 ```
 
-## 配置
+## Configuration
 
 ```bash
 cp config.yaml.example config.yaml
 ```
 
-**基础配置**
+**Basic**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `host` / `port` | 监听地址 |
-| `backend` | 后端地址，如 `http://127.0.0.1:8081` |
-| `startupCommand` | 启动时同步执行的命令(shell) |
-| `restart` | 重启配置对象，`enable: true` 时启用，见下表 |
-| `probe` | 后端探测配置对象，`enable: true` 时启用，见下表 |
-| `watchdog` | 速度看门狗配置对象，`enable: true` 时启用，见下表 |
+| `host` / `port` | listen address |
+| `backend` | backend address, e.g. `http://127.0.0.1:8081` |
+| `startupCommand` | shell command run synchronously at startup |
+| `restart` | restart config object, enabled with `enable: true`, see below |
+| `probe` | backend probe config object, enabled with `enable: true`, see below |
+| `watchdog` | speed watchdog config object, enabled with `enable: true`, see below |
 
-**restart（重启）**
+**restart**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `restart.enable` | 是否启用，默认 `false` |
-| `restart.interval` | 空闲多久(秒)触发，默认 `600` |
-| `restart.command` | 超时后执行的命令(shell)，如重启 llama |
+| `restart.enable` | whether enabled, default `false` |
+| `restart.interval` | trigger after being idle this many seconds, default `600` |
+| `restart.command` | shell command run on idle timeout, e.g. restarting llama |
 
-**probe（后端探测）**
+**probe**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `probe.enable` | 是否启用，默认 `false` |
-| `probe.interval` | 空闲多久(秒)触发，默认 `600` |
-| `probe.command` | 探测判定异常后执行的命令(shell) |
-| `probe.apiKey` | 探测 api key，仅探测时携带 `Bearer <key>`，正常代理不使用 |
-| `probe.model` | 探测请求使用的 model，默认 `default` |
-| `probe.prompt` | 探测提示词，默认 `hi` |
-| `probe.maxTokens` | 探测最大生成 token 数，默认 `64` |
-| `probe.repeatLimit` | 生成内容（含 `reasoning_content`）末尾同一字符连续出现达到该长度即判定异常，默认 `10` |
-| `probe.successLimit` | 生成内容累计达到该字符数且无异常时提前判定健康、立即结束探测，无需等待生成完成，默认 `20`（设为负值禁用） |
-| `probe.timeout` | 探测超时(秒)，默认 `5` |
+| `probe.enable` | whether enabled, default `false` |
+| `probe.interval` | trigger after being idle this many seconds, default `600` |
+| `probe.command` | shell command run after the probe declares unhealthy |
+| `probe.apiKey` | probe API key; sent as `Bearer <key>` only on probe requests, not used by normal proxying |
+| `probe.model` | model used by the probe request, default `default` |
+| `probe.prompt` | probe prompt, default `hi` |
+| `probe.maxTokens` | max generated tokens for the probe, default `64` |
+| `probe.repeatLimit` | same tail character (including `reasoning_content`) repeated this many times in a row is declared unhealthy, default `10` |
+| `probe.successLimit` | once normal content reaches this many cumulative characters, the backend is declared healthy early and the probe ends without waiting for generation to finish, default `20` (negative disables) |
+| `probe.timeout` | probe timeout in seconds, default `5` |
 
-**watchdog（速度看门狗）**
+**watchdog**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `watchdog.enable` | 是否启用，默认 `false` |
-| `watchdog.interval` | 采样 `/slots` 间隔(秒)，默认 `2`（频繁采样，及时发现） |
-| `watchdog.apiKey` | 后端 api key，采样 `/slots` 时携带 `Bearer <key>`（正常代理不使用），默认空 |
-| `watchdog.maxRate` | 生成速度上限(t/s)，采样间隔内平均速度超过该值判定一次超速，默认 `200` |
-| `watchdog.times` | 连续超速几次判异常并执行 command，默认 `2` |
-| `watchdog.verbose` | 是否打印测速正常日志（有请求且速度正常时 info 探测到的速度），默认 `false` |
-| `watchdog.command` | 判定异常后执行的命令(shell)，如重启 llama |
+| `watchdog.enable` | whether enabled, default `false` |
+| `watchdog.interval` | `/slots` sampling interval in seconds, default `2` (frequent sampling to detect early) |
+| `watchdog.apiKey` | backend API key; sent as `Bearer <key>` when sampling `/slots` (not used by normal proxying), default empty |
+| `watchdog.maxRate` | max generation speed (t/s); the average speed within a sample interval above this counts as one over-speed sample, default `200` |
+| `watchdog.times` | consecutive over-speed samples required to declare unhealthy and run the command, default `2` |
+| `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
+| `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |

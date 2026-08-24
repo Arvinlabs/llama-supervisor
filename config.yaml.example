@@ -1,55 +1,55 @@
-# 监听 host / port
+# listen host / port
 host: "0.0.0.0"
 port: 8080
 
-# 后端 llama.cpp 地址
+# backend llama.cpp address
 backend: "http://127.0.0.1:8081"
 
-# 启动命令
+# startup command
 startupCommand: "sudo /usr/bin/supervisorctl start llama"
 
-# ===== restart 重启配置：enable 为 true 时启用 =====
+# ===== restart config: enabled when enable is true =====
 restart:
   enable: true
-  # 空闲多久(秒)触发，默认 600
+  # trigger after being idle this many seconds, default 600
   interval: 300
-  # 执行的命令
+  # command to run
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 
-# ===== probe 后端探测配置：enable 为 true 时启用 =====
+# ===== probe config: enabled when enable is true =====
 probe:
   enable: true
-  # 空闲多久(秒)触发，默认 600
+  # trigger after being idle this many seconds, default 600
   interval: 600
-  # 探测判定异常后执行的命令
+  # command to run after the probe declares unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
-  # 探测 api key（仅探测时携带 Bearer <key>，正常代理不使用）
+  # probe API key (sent as Bearer <key> only on probe requests, not used by normal proxying)
   apiKey: ""
-  # 探测模型名，默认 "default"
+  # probe model name, default "default"
   model: "default"
-  # 探测 prompt，默认 "hi"
+  # probe prompt, default "hi"
   prompt: "hi"
-  # 探测最大生成 token 数，默认 64
+  # max generated tokens for the probe, default 64
   maxTokens: 64
-  # 连续重复字符判定异常阈值，默认 10
+  # repeated-tail threshold for declaring unhealthy, default 10
   repeatLimit: 10
-  # 正常内容累计达到该字符数即提前判定健康，不等生成结束，默认 20（设为负值禁用）
+  # once normal content reaches this many characters the backend is declared healthy early without waiting for generation to finish, default 20 (negative disables)
   successLimit: 20
-  # 探测超时(秒)，默认 5
+  # probe timeout in seconds, default 5
   timeout: 5
 
-# ===== watchdog 速度看门狗配置：enable 为 true 时启用 =====
+# ===== watchdog config: enabled when enable is true =====
 watchdog:
   enable: true
-  # 采样 /slots 间隔(秒)，默认 2
+  # /slots sampling interval in seconds, default 2
   interval: 2
-  # 后端 api key（采样 /slots 时携带 Bearer <key>，正常代理不使用），默认空（不携带）
+  # backend API key (sent as Bearer <key> when sampling /slots, not used by normal proxying), default empty (not sent)
   apiKey: ""
-  # 生成速度上限(t/s)，超过则判异常（死循环），默认 200
+  # max generation speed (t/s); above it is declared unhealthy (output loop), default 200
   maxRate: 200
-  # 连续超速几次判异常，默认 2
+  # consecutive over-speed samples required to declare unhealthy, default 2
   times: 2
-  # 是否打印测速正常日志（有请求且速度正常时 info），默认 false
+  # whether to log the measured speed on normal windows, default false
   verbose: false
-  # 判定异常后执行的命令
+  # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"

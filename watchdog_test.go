@@ -10,29 +10,29 @@ import (
 )
 
 func TestDecideFast(t *testing.T) {
-	// 无生成不判
+	// no generation, no trigger
 	if decideFast(watchdogState{}, watchdogState{processing: true, nDecoded: 10000}, time.Second, 200) {
 		t.Fatal("no prev processing should not trigger")
 	}
-	// 正常速度不判（44 t/s < 200）
+	// normal speed, no trigger (44 t/s < 200)
 	if decideFast(watchdogState{processing: true, nDecoded: 100}, watchdogState{processing: true, nDecoded: 144}, time.Second, 200) {
 		t.Fatal("44 t/s should not trigger")
 	}
-	// 恰达上限不判（> 而非 >=）
+	// exactly at the limit, no trigger (> rather than >=)
 	if decideFast(watchdogState{processing: true, nDecoded: 100}, watchdogState{processing: true, nDecoded: 300}, time.Second, 200) {
 		t.Fatal("200 t/s at threshold should not trigger")
 	}
-	// 超速判异常（死循环场景）
+	// over speed triggers (output loop scenario)
 	if !decideFast(watchdogState{processing: true, nDecoded: 100}, watchdogState{processing: true, nDecoded: 301}, time.Second, 200) {
 		t.Fatal("201 t/s above 200 t/s should trigger")
 	}
-	// 本窗口结束时槽位已停也算（循环刚结束，窗口内确实超速）
+	// it still counts if the slot stops by the end of the window (the loop just ended, but the window was indeed over speed)
 	if !decideFast(watchdogState{processing: true, nDecoded: 100}, watchdogState{nDecoded: 3000}, time.Second, 200) {
 		t.Fatal("burst then stop within window should still trigger")
 	}
 }
 
-// slotsHandler 返回可动态设置 n_decoded 的 /slots 响应
+// slotsHandler serves a /slots response whose n_decoded can be changed dynamically
 type slotsHandler struct {
 	nDecoded   atomic.Int64
 	processing atomic.Bool
@@ -44,11 +44,11 @@ func (s *slotsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.processing.Load() {
 		proc = "true"
 	}
-	// 对齐真实 /slots 响应：n_decoded 位于 next_token[] 内
+	// matches the real /slots response: n_decoded lives inside next_token[]
 	w.Write([]byte(`[{"id":1,"is_processing":` + proc + `,"next_token":[{"n_decoded":` + strconv.FormatInt(s.nDecoded.Load(), 10) + `}]}]`))
 }
 
-// 默认 times=2：单次超速不触发，连续两次超速才触发（进入 paused）
+// default times=2: a single over-speed sample does not trigger, two consecutive ones do (entering paused)
 func TestWatchdogTickDefaultTimes(t *testing.T) {
 	h := &slotsHandler{}
 	h.nDecoded.Store(100)
@@ -58,25 +58,25 @@ func TestWatchdogTickDefaultTimes(t *testing.T) {
 
 	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL)
 
-	p.tick(t.Context()) // 采样1：基线 n=100
+	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(105)
-	p.tick(t.Context()) // 采样2：5 t/s < 10，正常
+	p.tick(t.Context()) // sample 2: 5 t/s < 10, normal
 	if p.paused {
 		t.Fatal("normal speed should not trigger")
 	}
 	h.nDecoded.Store(300)
-	p.tick(t.Context()) // 采样3：195 t/s > 10，fast 1/2，不触发
+	p.tick(t.Context()) // sample 3: 195 t/s > 10, fast 1/2, no trigger
 	if p.paused {
 		t.Fatal("single fast sample should not trigger with default times=2")
 	}
 	h.nDecoded.Store(500)
-	p.tick(t.Context()) // 采样4：fast 2/2，触发
+	p.tick(t.Context()) // sample 4: fast 2/2, trigger
 	if !p.paused {
 		t.Fatal("expected paused after two fast samples with default times=2")
 	}
 }
 
-// times=2：需连续两次超速才触发
+// times=2: two consecutive over-speed samples are required to trigger
 func TestWatchdogTickTriggersAfterTwoFast(t *testing.T) {
 	h := &slotsHandler{}
 	h.nDecoded.Store(100)
@@ -86,20 +86,20 @@ func TestWatchdogTickTriggersAfterTwoFast(t *testing.T) {
 
 	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL)
 
-	p.tick(t.Context()) // 采样1：基线 n=100
+	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(200)
-	p.tick(t.Context()) // 采样2：fast 1/2
+	p.tick(t.Context()) // sample 2: fast 1/2
 	if p.paused {
 		t.Fatal("should not trigger on first fast sample")
 	}
 	h.nDecoded.Store(300)
-	p.tick(t.Context()) // 采样3：fast 2/2，触发
+	p.tick(t.Context()) // sample 3: fast 2/2, trigger
 	if !p.paused {
 		t.Fatal("expected paused after two consecutive fast samples")
 	}
 }
 
-// 触发后暂停一次采样再恢复，重置基线
+// after a trigger one sample is skipped before resuming, and the baseline is reset
 func TestWatchdogTickPausesOnce(t *testing.T) {
 	h := &slotsHandler{}
 	h.nDecoded.Store(100)
@@ -115,7 +115,7 @@ func TestWatchdogTickPausesOnce(t *testing.T) {
 	h.nDecoded.Store(300)
 	p.tick(t.Context()) // fast 2/2 -> paused
 	h.nDecoded.Store(301)
-	p.tick(t.Context()) // paused：跳过一次并重置基线
+	p.tick(t.Context()) // paused: skip one and reset the baseline
 	if p.paused {
 		t.Fatal("expected unpaused after skip tick")
 	}
@@ -124,7 +124,7 @@ func TestWatchdogTickPausesOnce(t *testing.T) {
 	}
 }
 
-// 速度回落后计数清零：孤立的超速窗口不会触发
+// the counter is reset when the speed drops back: an isolated over-speed window never triggers
 func TestWatchdogTickRecovers(t *testing.T) {
 	h := &slotsHandler{}
 	h.nDecoded.Store(100)
@@ -138,15 +138,15 @@ func TestWatchdogTickRecovers(t *testing.T) {
 	h.nDecoded.Store(200)
 	p.tick(t.Context()) // fast 1/2
 	h.nDecoded.Store(205)
-	p.tick(t.Context()) // 回落正常速度，计数清零
+	p.tick(t.Context()) // back to normal speed, counter reset
 	h.nDecoded.Store(300)
-	p.tick(t.Context()) // 又一次超速，仅 1/2，不触发
+	p.tick(t.Context()) // another over-speed, only 1/2, no trigger
 	if p.paused {
 		t.Fatal("single fast window after recovery should not trigger")
 	}
 }
 
-// 无生成期间（两窗口都无 processing）不判
+// no generation (no processing in either window), no trigger
 func TestWatchdogTickIdle(t *testing.T) {
 	h := &slotsHandler{}
 	srv := httptest.NewServer(h)
@@ -161,7 +161,7 @@ func TestWatchdogTickIdle(t *testing.T) {
 	}
 }
 
-// apiKey 非空时采样请求携带 Bearer <key>，为空则不携带
+// when apiKey is non-empty the sample request carries Bearer <key>; when empty, none
 func TestFetchSlotsApiKey(t *testing.T) {
 	var got atomic.Value
 	h := &slotsHandler{}
@@ -185,7 +185,7 @@ func TestFetchSlotsApiKey(t *testing.T) {
 	}
 }
 
-// 真实 /slots 响应结构：部分槽位无 next_token 字段，n_decoded 需从 next_token[] 聚合
+// real /slots response shape: some slots have no next_token field; n_decoded must be aggregated from next_token[]
 func TestFetchSlotsRealShape(t *testing.T) {
 	body := `[
 	  {"id": 0, "n_ctx": 163840, "speculative": true, "is_processing": false},
@@ -209,7 +209,7 @@ func TestFetchSlotsRealShape(t *testing.T) {
 	}
 }
 
-// /slots 拉取失败不影响基线
+// a /slots fetch failure must not affect the baseline
 func TestWatchdogTickFetchFail(t *testing.T) {
 	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, "http://127.0.0.1:1")
 	p.prev = watchdogState{processing: true, nDecoded: 100}

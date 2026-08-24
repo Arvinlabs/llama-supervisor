@@ -6,14 +6,14 @@ import (
 	"time"
 )
 
-// 惰性计时：首次请求前不计时，即使挂钟时间超过时间窗口也不应触发
+// lazy timing: no timing before the first request, even if wall-clock time exceeds the window it must not trigger
 func TestLazyIdleTrackerNotActiveBeforeFirstRequest(t *testing.T) {
 	trig := 0
 	lt := newLazyIdleTracker(50*time.Millisecond, func(ctx context.Context) bool {
 		trig++
 		return true
 	})
-	// 无任何请求，远超时间窗口
+	// no requests at all, far beyond the window
 	time.Sleep(120 * time.Millisecond)
 	lt.consumeIdle(t.Context())
 	if trig != 0 {
@@ -28,12 +28,12 @@ func TestLazyIdleTrackerLifecycle(t *testing.T) {
 		return true
 	})
 
-	// 首次请求前无计时
+	// no timing before the first request
 	if lt.consumeIdle(t.Context()) {
 		t.Fatal("should not trigger before first request")
 	}
 
-	// 首次请求开始计时
+	// the first request starts timing
 	lt.onHTTPRequest()
 	time.Sleep(30 * time.Millisecond)
 	lt.consumeIdle(t.Context())
@@ -41,7 +41,7 @@ func TestLazyIdleTrackerLifecycle(t *testing.T) {
 		t.Fatal("should not trigger before interval")
 	}
 
-	// 请求延展时间窗口
+	// a request extends the window
 	lt.onHTTPRequest()
 	time.Sleep(30 * time.Millisecond)
 	lt.consumeIdle(t.Context())
@@ -49,7 +49,7 @@ func TestLazyIdleTrackerLifecycle(t *testing.T) {
 		t.Fatal("extended window should not have expired")
 	}
 
-	// 超时触发
+	// the timeout triggers
 	time.Sleep(80 * time.Millisecond)
 	if !lt.consumeIdle(t.Context()) {
 		t.Fatal("should trigger after idle interval")
@@ -58,14 +58,14 @@ func TestLazyIdleTrackerLifecycle(t *testing.T) {
 		t.Fatalf("expected 1 trigger, got %d", trig)
 	}
 
-	// 触发后暂停计时：长时间无请求也不触发
+	// paused after the trigger: no requests for a long time, still no trigger
 	time.Sleep(100 * time.Millisecond)
 	lt.consumeIdle(t.Context())
 	if trig != 1 {
 		t.Fatalf("should stay paused, got %d triggers", trig)
 	}
 
-	// 再次有请求才开始重新计时
+	// timing restarts only when a new request arrives
 	lt.onHTTPRequest()
 	time.Sleep(30 * time.Millisecond)
 	lt.consumeIdle(t.Context())
@@ -79,7 +79,7 @@ func TestLazyIdleTrackerLifecycle(t *testing.T) {
 	}
 }
 
-// 普通计时（probe 使用）：从创建开始计时，触发后自动重新计时，行为不变
+// plain timing (used by probe): timing starts at creation, re-arms automatically after a trigger, behavior unchanged
 func TestIdleTrackerStillImmediate(t *testing.T) {
 	trig := 0
 	it := newIdleTracker(40*time.Millisecond, func(ctx context.Context) bool {
@@ -87,13 +87,13 @@ func TestIdleTrackerStillImmediate(t *testing.T) {
 		return true
 	})
 
-	// 无请求也会计时，到期即触发
+	// timing runs even without requests; triggers when due
 	time.Sleep(60 * time.Millisecond)
 	if !it.consumeIdle(t.Context()) || trig != 1 {
 		t.Fatalf("expected immediate trigger, got %d", trig)
 	}
 
-	// 触发后自动重新计时，到期再次触发（即使无请求也不暂停）
+	// re-arms automatically after a trigger and triggers again when due (does not pause even without requests)
 	time.Sleep(60 * time.Millisecond)
 	it.consumeIdle(t.Context())
 	if trig != 2 {

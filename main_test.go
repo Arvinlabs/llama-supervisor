@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-// 客户端中途断开时，代理到后端的请求上下文必须被取消（提前结束后端生成，不空跑到完成）
+// when the client disconnects mid-stream, the proxied request context toward the backend
+// must be canceled (abort the backend generation early instead of letting it run to completion)
 func TestProxyClientDisconnectCancelsBackend(t *testing.T) {
 	backendErr := make(chan error, 1)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +21,7 @@ func TestProxyClientDisconnectCancelsBackend(t *testing.T) {
 			backendErr <- r.Context().Err()
 		}()
 		fl := w.(http.Flusher)
-		for i := 0; i < 200; i++ { // 长流式响应，模拟持续生成
+		for i := 0; i < 200; i++ { // long streaming response, simulating continuous generation
 			w.Write([]byte("data: x\n\n"))
 			fl.Flush()
 			select {
@@ -36,7 +37,7 @@ func TestProxyClientDisconnectCancelsBackend(t *testing.T) {
 	srv := httptest.NewServer(sup)
 	defer srv.Close()
 
-	// 客户端：读到首批流式数据后立即断开连接
+	// client: read the first batch of streaming data, then disconnect
 	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -62,16 +63,18 @@ func TestProxyClientDisconnectCancelsBackend(t *testing.T) {
 	}
 }
 
-// 客户端断开时，代理正阻塞在后端流式读取（后端长时间不发包，如思考阶段）：
-// ctxBody 必须主动关闭后端连接，代理 handler 立即返回，后端请求被终止
+// when the client disconnects while the proxy is blocked reading the backend stream
+// (the backend stays silent for a long time, e.g. the thinking phase):
+// ctxBody must proactively close the backend connection, the proxy handler returns immediately,
+// and the backend request is aborted
 func TestProxyClientDisconnectAbortsBlockedBackend(t *testing.T) {
 	backendDone := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("partial")) // 只发首包，之后长时间不发包（模拟思考/慢生成）
+		w.Write([]byte("partial")) // send only the first chunk, then stay silent for a long time (simulating thinking/slow generation)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		<-r.Context().Done() // 等待代理提前断开连接
+		<-r.Context().Done() // wait for the proxy to disconnect the connection early
 		close(backendDone)
 	}))
 	defer backend.Close()
@@ -86,8 +89,8 @@ func TestProxyClientDisconnectAbortsBlockedBackend(t *testing.T) {
 		sup.ServeHTTP(w, req)
 		close(proxyDone)
 	}()
-	time.Sleep(100 * time.Millisecond) // 等首包转发、代理阻塞在后端读取上
-	ctxCancel() // 模拟客户端断开
+	time.Sleep(100 * time.Millisecond) // wait for the first chunk to be forwarded and the proxy to block on the backend read
+	ctxCancel()                        // simulate the client disconnect
 
 	select {
 	case <-proxyDone:

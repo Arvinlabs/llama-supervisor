@@ -27,11 +27,11 @@ func TestBuildProbeConfigOverrides(t *testing.T) {
 }
 
 func TestBuildProbeConfigClampsAndDisablesSuccessLimit(t *testing.T) {
-	// successLimit 小于 repeatLimit 时提升到 repeatLimit，避免退化流被提前判健康
+	// when successLimit is below repeatLimit it is raised to repeatLimit, so a degenerate stream is not declared healthy early
 	if pc := buildProbeConfig(&ProbeGroup{RepeatLimit: 20, SuccessLimit: 5}); pc.successLimit != 20 {
 		t.Fatalf("expected clamp to repeatLimit, got %+v", pc)
 	}
-	// 负值禁用提前成功
+	// a negative value disables early success
 	if pc := buildProbeConfig(&ProbeGroup{SuccessLimit: -1}); pc.successLimit != 0 {
 		t.Fatalf("expected disabled, got %+v", pc)
 	}
@@ -103,7 +103,8 @@ func TestProbeBackendStreamingDegenerateContent(t *testing.T) {
 	}
 }
 
-// reasoning 尾部与 content 首字符相同但各自都未达 limit：不应跨字段连成一条序列
+// the reasoning tail and the content head share the same character but neither reaches the limit:
+// the run must not span across fields into a single sequence
 func TestProbeBackendStreamingIndependentCounters(t *testing.T) {
 	pairs := [][2]string{{"xxxxx", ""}}
 	for i := 0; i < 15; i++ {
@@ -158,7 +159,8 @@ func TestProbeBackend(t *testing.T) {
 	})
 }
 
-// 提前成功：累计正常内容达到 successLimit 后立即返回健康，不等待 [DONE]/生成结束
+// early success: once the cumulative normal content reaches successLimit, return healthy immediately
+// without waiting for [DONE]/generation to end
 func TestProbeBackendEarlySuccess(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +168,7 @@ func TestProbeBackendEarlySuccess(t *testing.T) {
 		fl, _ := w.(http.Flusher)
 		w.Write([]byte(`data: {"choices":[{"delta":{"content":"hello world, this is a normal answer"}}]}` + "\n\n"))
 		fl.Flush()
-		<-release // 后端持续"生成"，永远不结束
+		<-release // the backend keeps "generating" and never ends
 	}))
 	defer srv.Close()
 	defer close(release)
@@ -182,7 +184,7 @@ func TestProbeBackendEarlySuccess(t *testing.T) {
 	}
 }
 
-// 提前成功不会掩盖退化：32 字符达到 successLimit，但连续 'a' 已达 repeatLimit
+// early success must not mask degeneration: 32 characters reach successLimit, but the consecutive 'a' run already hit repeatLimit
 func TestProbeBackendStreamingEarlySuccessNotMaskDegenerate(t *testing.T) {
 	var pairs [][2]string
 	for i := 0; i < 4; i++ {
@@ -194,7 +196,7 @@ func TestProbeBackendStreamingEarlySuccessNotMaskDegenerate(t *testing.T) {
 	}
 }
 
-// 用户请求 ctx 取消（提前断开连接）时，probe 策略改用服务器级 ctx，探测仍应正常执行
+// when the user request ctx is canceled (early disconnect), the probe policy falls back to the server-level ctx; the probe should still run normally
 func TestProbePolicySurvivesRequestCtxCancel(t *testing.T) {
 	got := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,13 +207,13 @@ func TestProbePolicySurvivesRequestCtxCancel(t *testing.T) {
 	defer srv.Close()
 
 	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour)
-	// 强制空闲到期
+	// force the idle deadline to be due
 	p.tracker.mu.Lock()
 	p.tracker.deadline = time.Now().Add(-time.Second)
 	p.tracker.mu.Unlock()
 
 	reqCtx, cancel := context.WithCancel(context.Background())
-	cancel() // 模拟用户提前断开
+	cancel() // simulate the user disconnecting early
 	healthy := p.consumeIdle(reqCtx)
 	if !got {
 		t.Fatal("probe should still run after user request ctx canceled")

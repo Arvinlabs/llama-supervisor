@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// restartPolicy 重启策略：空闲超时则执行 restart.command。
-// 计时首次请求后才开始；请求不断则时间窗口延展；触发重启后暂停计时，无请求不计时，再次有请求才开始计时
+// restartPolicy restart strategy: run restart.command when the idle timeout is crossed.
+// Timing starts only after the first request; as long as requests keep coming the window extends;
+// after a trigger timing is paused (no timing without requests) and restarts on the next request
 type restartPolicy struct {
 	tracker *idleTracker
 	command string

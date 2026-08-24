@@ -19,11 +19,11 @@ type probeConfig struct {
 	prompt       string
 	maxTokens    int
 	repeatLimit  int
-	successLimit int // 正常内容累计达到该字符数即提前判定健康，不等待生成结束；0 表示禁用
+	successLimit int // normal content reaching this many cumulative characters is declared healthy early without waiting for generation to end; 0 disables it
 	timeout      time.Duration
 }
 
-// buildProbeConfig 从探测分组构建实际探测参数（补默认值）
+// buildProbeConfig builds the effective probe parameters from the probe config group (filling in defaults)
 func buildProbeConfig(g *ProbeGroup) probeConfig {
 	pc := probeConfig{
 		apiKey:       g.ApiKey,
@@ -49,22 +49,23 @@ func buildProbeConfig(g *ProbeGroup) probeConfig {
 	if g.SuccessLimit > 0 {
 		pc.successLimit = g.SuccessLimit
 	} else if g.SuccessLimit < 0 {
-		pc.successLimit = 0 // 负值表示禁用提前成功
+		pc.successLimit = 0 // a negative value disables early success
 	}
 	if g.Timeout > 0 {
 		pc.timeout = time.Duration(g.Timeout) * time.Second
 	}
-	// 提前成功阈值不小于重复阈值，保证退化流先被判异常而不是提前判健康
+	// keep the early-success threshold at least the repeat threshold, so a degenerate stream is flagged unhealthy before it can be declared healthy early
 	if pc.successLimit > 0 && pc.successLimit < pc.repeatLimit {
 		pc.successLimit = pc.repeatLimit
 	}
 	return pc
 }
 
-// probePolicy 探测策略：空闲超时则探测后端，判定异常则执行 probe.command
+// probePolicy probe strategy: on idle timeout probe the backend, and run probe.command when unhealthy
 type probePolicy struct {
-	// ctx 服务器级 ctx（退出信号驱动），探测与命令执行不跟随用户请求的 ctx，
-	// 避免用户提前断开连接导致探测被取消而误判异常
+	// ctx is the server-level ctx (driven by the exit signal); the probe and command execution do
+	// not follow the user request ctx, so an early user disconnect cannot cancel the probe and
+	// cause a false unhealthy verdict
 	ctx     context.Context
 	tracker *idleTracker
 	cmd     string
@@ -90,11 +91,11 @@ func (p *probePolicy) onHTTPRequest() {
 }
 
 func (p *probePolicy) consumeIdle(_ context.Context) bool {
-	// 传入的 ctx 是用户请求 ctx，探测不继承它，改用服务器级 ctx
+	// the passed ctx is the user request ctx; the probe does not inherit it and uses the server-level ctx instead
 	return p.tracker.consumeIdle(p.ctx)
 }
 
-// runProbe 探测后端，异常则执行 probe.command，返回是否实际执行了命令
+// runProbe probes the backend; on unhealthy it runs probe.command and returns whether the command was actually executed
 func (p *probePolicy) runProbe(ctx context.Context) bool {
 	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds",
 		p.backend, p.probe.model, p.probe.prompt, p.probe.maxTokens, p.probe.repeatLimit, p.probe.successLimit, int(p.probe.timeout.Seconds()))
@@ -111,7 +112,7 @@ func (p *probePolicy) runProbe(ctx context.Context) bool {
 	return runCommand(ctx, "health", p.cmd)
 }
 
-// probeBackend 探测后端是否可用（通过流式 chat completion 判断）
+// probeBackend probes whether the backend is usable (via a streaming chat completion)
 func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, pc.timeout)
 	defer cancel()
@@ -151,7 +152,7 @@ func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy 
 	return probeBackendStreaming(resp.Body, pc)
 }
 
-// sseEvent 一行 SSE 事件（OpenAI 兼容 chat completion chunk，部分模型额外返回 reasoning_content）
+// sseEvent is one SSE event line (OpenAI-compatible chat completion chunk; some models additionally return reasoning_content)
 type sseEvent struct {
 	Choices []struct {
 		Delta struct {
@@ -161,7 +162,7 @@ type sseEvent struct {
 	} `json:"choices"`
 }
 
-// repeatChecker 独立统计某一字段末尾字符的连续重复次数
+// repeatChecker independently counts the tail-character repeat run of one field
 type repeatChecker struct {
 	limit    int
 	lastChar rune
@@ -183,14 +184,14 @@ func (c *repeatChecker) check(field string, s string) (bool, error) {
 	return true, nil
 }
 
-// probeBackendStreaming 读取 SSE 流，判断内容是否退化（连续重复 token）
+// probeBackendStreaming reads the SSE stream and checks whether the content is degenerate (repeated tokens)
 func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	reasoningCheck := &repeatChecker{limit: pc.repeatLimit}
 	contentCheck := &repeatChecker{limit: pc.repeatLimit}
-	totalLen := 0 // 累计正常生成字符数（reasoning_content + content）
+	totalLen := 0 // cumulative normal generated characters (reasoning_content + content)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -216,7 +217,7 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 			return false, err
 		}
 		totalLen += len(delta.ReasoningContent) + len(delta.Content)
-		// 提前成功：内容正常且累计达到 successLimit，无需等待生成结束
+		// early success: content is normal and the cumulative length reached successLimit, no need to wait for generation to end
 		if pc.successLimit > 0 && totalLen >= pc.successLimit {
 			return true, nil
 		}
