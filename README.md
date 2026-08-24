@@ -1,9 +1,10 @@
 # llama-supervisor
 
-Go reverse proxy with idle health probing, automatic restart, and a speed watchdog. The idle timer keeps resetting while requests are active. `restart`, `probe`, and `watchdog` are three independent features, each toggled by its own `enable` switch (all can be disabled, in which case the process only reverse-proxies):
+Go reverse proxy with idle health probing, automatic restart, a speed watchdog, and a request policy. The idle timer keeps resetting while requests are active. `restart`, `probe`, and `watchdog` are three independent features, each toggled by its own `enable` switch; the `request` policy holds sub-features (like prefix cache), each toggled by its own switch (all can be disabled, in which case the process only reverse-proxies):
 
 - `probe.enable: true`: after being idle for `probe.interval` seconds, the next request triggers a probe of the backend llama server before proxying. If the tail characters keep repeating during streaming, the backend is considered unhealthy, `probe.command` runs, and then the request is proxied.
 - `restart.enable: true`: an independent background check. Timing starts after the first request; as long as requests keep coming the window extends. Once idle for `restart.interval` seconds, `restart.command` runs directly without waiting for a request. After a trigger, timing is paused: no requests means no timing, and a new request restarts the timer.
+- `request.prefixCache: true`: normalize `/v1/chat/completions` request bodies before proxying to maximize the backend prefix cache hit rate — the tools list is sorted by tool name (`function.name` / `custom.name` per the OpenAI spec) and all JSON object keys (including tool parameter schemas) are re-emitted in sorted order, so semantically identical requests produce identical bytes.
 
 ## Features
 
@@ -42,6 +43,7 @@ cp config.yaml.example config.yaml
 | `restart` | restart config object, enabled with `enable: true`, see below |
 | `probe` | backend probe config object, enabled with `enable: true`, see below |
 | `watchdog` | speed watchdog config object, enabled with `enable: true`, see below |
+| `request` | request policy config object, see below |
 
 **restart**
 
@@ -77,3 +79,9 @@ cp config.yaml.example config.yaml
 | `watchdog.times` | consecutive over-speed samples required to declare unhealthy and run the command, default `2` |
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |
+
+**request (request policy)**
+
+| Field | Description |
+|---|---|
+| `request.prefixCache` | prefix cache, default `false`. When enabled, `/v1/chat/completions` request bodies are normalized before proxying: the tools list is sorted by tool name (`function.name` / `custom.name` per the OpenAI spec) and every JSON object's keys are re-emitted in sorted order (including tool parameter schemas), so semantically identical requests produce identical bytes and the backend prefix cache hits |

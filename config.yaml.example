@@ -53,3 +53,10 @@ watchdog:
   verbose: false
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
+
+# ===== request policy config =====
+request:
+  # prefix cache: normalize /v1/chat/completions request bodies (sort the tools list by tool
+  # name, sort all JSON object keys recursively) so semantically identical requests share one
+  # canonical byte form and the backend prefix cache hits
+  prefixCache: true

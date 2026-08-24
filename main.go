@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ type proxy struct {
 	restart  *restartPolicy  // restart policy (nil when restart is disabled)
 	probe    *probePolicy    // probe policy (nil when probe is disabled)
 	watchdog *watchdogPolicy // watchdog policy (nil when watchdog is disabled)
+	request  *requestPolicy  // request policy (nil when no request sub-feature is enabled)
 }
 
 // newBackendProxy creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -40,7 +42,24 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	if backend.Hostname() == "" || backend.Port() == "" {
 		log.Fatalf("backend %q: host and explicit port are required", cfg.Backend)
 	}
-	rp := httputil.NewSingleHostReverseProxy(backend)
+	p := &proxy{
+		backendURL:  cfg.Backend,
+		backendAddr: backend.Host,
+	}
+	var rp *httputil.ReverseProxy
+	if cfg.Request.Enabled() {
+		// with a request policy use the Rewrite API (Director has no request hook):
+		// SetURL routes to the backend, then the policy modifiers run on the outbound request
+		p.request = newRequestPolicy(cfg.Request)
+		rp = &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(backend)
+				p.request.modifyRequest(pr.Out)
+			},
+		}
+	} else {
+		rp = httputil.NewSingleHostReverseProxy(backend)
+	}
 	// FlushInterval=0: flush after every Write so SSE/streaming output reaches the client unbuffered
 	rp.FlushInterval = 0
 	// When the client disconnects (request ctx canceled), close the backend response body proactively:
@@ -52,11 +71,7 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 		cb.watch()
 		return nil
 	}
-	p := &proxy{
-		proxy:       rp,
-		backendURL:  cfg.Backend,
-		backendAddr: backend.Host,
-	}
+	p.proxy = rp
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		if cerr := r.Context().Err(); cerr != nil {
 			// The client already disconnected (ctx canceled): the backend request was aborted early, not a backend failure
@@ -77,8 +92,8 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	if cfg.Watchdog.Enabled() {
 		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend)
 	}
-	if p.restart == nil && p.probe == nil && p.watchdog == nil {
-		log.Print("[config] restart, probe and watchdog all disabled, proxying only")
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil {
+		log.Print("[config] restart, probe, watchdog and request all disabled, proxying only")
 	}
 	return p
 }
@@ -298,6 +313,15 @@ func main() {
 		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
 	} else {
 		log.Print("[config] watchdog disabled")
+	}
+	if cfg.Request.Enabled() {
+		var feats []string
+		if cfg.Request.PrefixCache {
+			feats = append(feats, "prefixCache")
+		}
+		log.Printf("[config] request enabled: %s", strings.Join(feats, ", "))
+	} else {
+		log.Print("[config] request disabled")
 	}
 
 	// startup command

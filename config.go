@@ -54,6 +54,18 @@ func (g *WatchdogGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// RequestGroup request policy config; each sub-feature is independently switchable
+type RequestGroup struct {
+	// PrefixCache normalizes /v1/chat/completions request bodies so that semantically
+	// identical requests produce identical bytes, maximizing the backend prefix cache hit rate
+	PrefixCache bool `yaml:"prefixCache"`
+}
+
+// Enabled reports whether any request policy sub-feature is enabled
+func (g *RequestGroup) Enabled() bool {
+	return g != nil && g.PrefixCache
+}
+
 type Config struct {
 	Host           string         `yaml:"host"`
 	Port           int            `yaml:"port"`
@@ -62,6 +74,7 @@ type Config struct {
 	Restart        *RestartGroup  `yaml:"restart"`
 	Probe          *ProbeGroup    `yaml:"probe"`
 	Watchdog       *WatchdogGroup `yaml:"watchdog"`
+	Request        *RequestGroup  `yaml:"request"`
 }
 
 // restartInterval returns the restart group's idle threshold (configured in seconds)
