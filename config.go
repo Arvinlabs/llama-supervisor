@@ -26,7 +26,6 @@ type ProbeGroup struct {
 	Enable       bool   `yaml:"enable"`       // whether enabled
 	Interval     int    `yaml:"interval"`     // idle seconds before triggering, default 600
 	Command      string `yaml:"command"`      // command run after the probe declares unhealthy
-	ApiKey       string `yaml:"apiKey"`       // probe API key (sent as Bearer <key> only on probe requests, not used by normal proxying)
 	Model        string `yaml:"model"`        // probe model name, default "default"
 	Prompt       string `yaml:"prompt"`       // probe prompt, default "hi"
 	MaxTokens    int    `yaml:"maxTokens"`    // max generated tokens for the probe, default 64
@@ -43,7 +42,6 @@ func (g *ProbeGroup) Enabled() bool {
 type WatchdogGroup struct {
 	Enable   bool    `yaml:"enable"`   // whether enabled
 	Interval int     `yaml:"interval"` // sampling interval in seconds, default 2
-	ApiKey   string  `yaml:"apiKey"`   // backend API key (sent as Bearer <key> when sampling /slots, not used by normal proxying)
 	Verbose  bool    `yaml:"verbose"`  // whether to log the measured speed on normal windows, default false
 	MaxRate  float64 `yaml:"maxRate"`  // max generation speed (t/s); above it is declared unhealthy (output loop), default 200
 	Times    int     `yaml:"times"`    // consecutive over-speed samples required to declare unhealthy, default 1
@@ -70,6 +68,7 @@ type Config struct {
 	Host           string         `yaml:"host"`
 	Port           int            `yaml:"port"`
 	Backend        string         `yaml:"backend"`
+	ApiKey         string         `yaml:"apiKey"` // global backend API key, sent as Bearer <key> on probe and /slots sampling requests; not used by normal proxying
 	StartupCommand string         `yaml:"startupCommand"`
 	Restart        *RestartGroup  `yaml:"restart"`
 	Probe          *ProbeGroup    `yaml:"probe"`

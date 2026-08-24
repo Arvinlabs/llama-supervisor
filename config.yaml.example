@@ -5,6 +5,9 @@ port: 8080
 # backend llama.cpp address
 backend: "http://127.0.0.1:8081"
 
+# global backend API key (sent as Bearer <key> on probe and /slots sampling requests, not used by normal proxying), default empty (not sent)
+apiKey: ""
+
 # startup command
 startupCommand: "sudo /usr/bin/supervisorctl start llama"
 
@@ -23,8 +26,6 @@ probe:
   interval: 600
   # command to run after the probe declares unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
-  # probe API key (sent as Bearer <key> only on probe requests, not used by normal proxying)
-  apiKey: ""
   # probe model name, default "default"
   model: "default"
   # probe prompt, default "hi"
@@ -43,8 +44,6 @@ watchdog:
   enable: true
   # /slots sampling interval in seconds, default 2
   interval: 2
-  # backend API key (sent as Bearer <key> when sampling /slots, not used by normal proxying), default empty (not sent)
-  apiKey: ""
   # max generation speed (t/s); above it is declared unhealthy (output loop), default 200
   maxRate: 200
   # consecutive over-speed samples required to declare unhealthy, default 2

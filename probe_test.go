@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuildProbeConfigDefaults(t *testing.T) {
-	pc := buildProbeConfig(&ProbeGroup{Enable: true, Interval: 30, Command: "cmd"})
+	pc := buildProbeConfig(&ProbeGroup{Enable: true, Interval: 30, Command: "cmd"}, "")
 	if pc.model != "default" || pc.prompt != "hi" || pc.maxTokens != 64 || pc.repeatLimit != 10 || pc.successLimit != 20 || pc.timeout != 5*time.Second {
 		t.Fatalf("unexpected defaults: %+v", pc)
 	}
@@ -19,8 +19,8 @@ func TestBuildProbeConfigDefaults(t *testing.T) {
 func TestBuildProbeConfigOverrides(t *testing.T) {
 	pc := buildProbeConfig(&ProbeGroup{
 		Enable: true, Interval: 30, Command: "cmd",
-		ApiKey: "k", Model: "m", Prompt: "p", MaxTokens: 10, RepeatLimit: 5, SuccessLimit: 8, Timeout: 1,
-	})
+		Model: "m", Prompt: "p", MaxTokens: 10, RepeatLimit: 5, SuccessLimit: 8, Timeout: 1,
+	}, "k")
 	if pc.apiKey != "k" || pc.model != "m" || pc.prompt != "p" || pc.maxTokens != 10 || pc.repeatLimit != 5 || pc.successLimit != 8 || pc.timeout != time.Second {
 		t.Fatalf("unexpected overrides: %+v", pc)
 	}
@@ -28,11 +28,11 @@ func TestBuildProbeConfigOverrides(t *testing.T) {
 
 func TestBuildProbeConfigClampsAndDisablesSuccessLimit(t *testing.T) {
 	// when successLimit is below repeatLimit it is raised to repeatLimit, so a degenerate stream is not declared healthy early
-	if pc := buildProbeConfig(&ProbeGroup{RepeatLimit: 20, SuccessLimit: 5}); pc.successLimit != 20 {
+	if pc := buildProbeConfig(&ProbeGroup{RepeatLimit: 20, SuccessLimit: 5}, ""); pc.successLimit != 20 {
 		t.Fatalf("expected clamp to repeatLimit, got %+v", pc)
 	}
 	// a negative value disables early success
-	if pc := buildProbeConfig(&ProbeGroup{SuccessLimit: -1}); pc.successLimit != 0 {
+	if pc := buildProbeConfig(&ProbeGroup{SuccessLimit: -1}, ""); pc.successLimit != 0 {
 		t.Fatalf("expected disabled, got %+v", pc)
 	}
 }
@@ -206,7 +206,7 @@ func TestProbePolicySurvivesRequestCtxCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour)
+	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour, "")
 	// force the idle deadline to be due
 	p.tracker.mu.Lock()
 	p.tracker.deadline = time.Now().Add(-time.Second)

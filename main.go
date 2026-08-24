@@ -87,10 +87,10 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 		p.restart = newRestartPolicy(cfg.Restart, restartInterval(cfg))
 	}
 	if cfg.Probe.Enabled() {
-		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg))
+		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg), cfg.ApiKey)
 	}
 	if cfg.Watchdog.Enabled() {
-		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend)
+		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
 	}
 	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil {
 		log.Print("[config] restart, probe, watchdog and request all disabled, proxying only")
@@ -291,6 +291,8 @@ func main() {
 	ctx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
 
+	log.Print("[config] apiKey=" + secretMask(cfg.ApiKey))
+
 	if cfg.Restart.Enabled() {
 		log.Printf("[config] restart enabled: interval=%ds",
 			int(restartInterval(cfg).Seconds()))
@@ -299,17 +301,17 @@ func main() {
 		log.Print("[config] restart disabled")
 	}
 	if cfg.Probe.Enabled() {
-		pc := buildProbeConfig(cfg.Probe)
-		log.Printf("[config] probe enabled: interval=%ds model=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds apiKey=%q",
-			int(probeInterval(cfg).Seconds()), pc.model, pc.maxTokens, pc.repeatLimit, pc.successLimit, int(pc.timeout.Seconds()), secretMask(pc.apiKey))
+		pc := buildProbeConfig(cfg.Probe, cfg.ApiKey)
+		log.Printf("[config] probe enabled: interval=%ds model=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds",
+			int(probeInterval(cfg).Seconds()), pc.model, pc.maxTokens, pc.repeatLimit, pc.successLimit, int(pc.timeout.Seconds()))
 		log.Print("[config] probe command: " + cfg.Probe.Command)
 	} else {
 		log.Print("[config] probe disabled")
 	}
 	if cfg.Watchdog.Enabled() {
 		wc := buildWatchdogConfig(cfg.Watchdog)
-		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d apiKey=%q",
-			int(wc.interval.Seconds()), wc.maxRate, wc.times, secretMask(cfg.Watchdog.ApiKey))
+		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d",
+			int(wc.interval.Seconds()), wc.maxRate, wc.times)
 		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
 	} else {
 		log.Print("[config] watchdog disabled")

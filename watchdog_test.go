@@ -56,7 +56,7 @@ func TestWatchdogTickDefaultTimes(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL)
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "")
 
 	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(105)
@@ -84,7 +84,7 @@ func TestWatchdogTickTriggersAfterTwoFast(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL)
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
 
 	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(200)
@@ -107,7 +107,7 @@ func TestWatchdogTickPausesOnce(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL)
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
 
 	p.tick(t.Context())
 	h.nDecoded.Store(200)
@@ -132,7 +132,7 @@ func TestWatchdogTickRecovers(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL)
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
 
 	p.tick(t.Context())
 	h.nDecoded.Store(200)
@@ -152,7 +152,7 @@ func TestWatchdogTickIdle(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL)
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "")
 
 	p.tick(t.Context())
 	p.tick(t.Context())
@@ -211,7 +211,7 @@ func TestFetchSlotsRealShape(t *testing.T) {
 
 // a /slots fetch failure must not affect the baseline
 func TestWatchdogTickFetchFail(t *testing.T) {
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, "http://127.0.0.1:1")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, "http://127.0.0.1:1", "")
 	p.prev = watchdogState{processing: true, nDecoded: 100}
 	p.tick(t.Context())
 	if p.prev.nDecoded != 100 {

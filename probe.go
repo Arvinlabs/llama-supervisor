@@ -23,10 +23,11 @@ type probeConfig struct {
 	timeout      time.Duration
 }
 
-// buildProbeConfig builds the effective probe parameters from the probe config group (filling in defaults)
-func buildProbeConfig(g *ProbeGroup) probeConfig {
+// buildProbeConfig builds the effective probe parameters from the probe config group (filling in
+// defaults); apiKey is the global apiKey
+func buildProbeConfig(g *ProbeGroup, apiKey string) probeConfig {
 	pc := probeConfig{
-		apiKey:       g.ApiKey,
+		apiKey:       apiKey,
 		model:        "default",
 		prompt:       "hi",
 		maxTokens:    64,
@@ -73,12 +74,12 @@ type probePolicy struct {
 	probe   probeConfig
 }
 
-func newProbePolicy(ctx context.Context, backend string, g *ProbeGroup, interval time.Duration) *probePolicy {
+func newProbePolicy(ctx context.Context, backend string, g *ProbeGroup, interval time.Duration, apiKey string) *probePolicy {
 	p := &probePolicy{
 		ctx:     ctx,
 		cmd:     g.Command,
 		backend: backend,
-		probe:   buildProbeConfig(g),
+		probe:   buildProbeConfig(g, apiKey),
 	}
 	p.tracker = newIdleTracker(interval, func(ctx context.Context) bool {
 		return p.runProbe(ctx)

@@ -70,12 +70,12 @@ type watchdogPolicy struct {
 	lastFail string // last fetch error message; only logged when it changes
 }
 
-// newWatchdogPolicy creates the watchdog policy
-func newWatchdogPolicy(g *WatchdogGroup, backend string) *watchdogPolicy {
+// newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey
+func newWatchdogPolicy(g *WatchdogGroup, backend string, apiKey string) *watchdogPolicy {
 	return &watchdogPolicy{
 		config:  buildWatchdogConfig(g),
 		backend: backend,
-		apiKey:  g.ApiKey,
+		apiKey:  apiKey,
 	}
 }
 

@@ -39,6 +39,7 @@ cp config.yaml.example config.yaml
 |---|---|
 | `host` / `port` | listen address |
 | `backend` | backend address, e.g. `http://127.0.0.1:8081` |
+| `apiKey` | global backend API key, sent as `Bearer <key>` on probe and `/slots` sampling requests (not used by normal proxying), default empty |
 | `startupCommand` | shell command run synchronously at startup |
 | `restart` | restart config object, enabled with `enable: true`, see below |
 | `probe` | backend probe config object, enabled with `enable: true`, see below |
@@ -60,7 +61,6 @@ cp config.yaml.example config.yaml
 | `probe.enable` | whether enabled, default `false` |
 | `probe.interval` | trigger after being idle this many seconds, default `600` |
 | `probe.command` | shell command run after the probe declares unhealthy |
-| `probe.apiKey` | probe API key; sent as `Bearer <key>` only on probe requests, not used by normal proxying |
 | `probe.model` | model used by the probe request, default `default` |
 | `probe.prompt` | probe prompt, default `hi` |
 | `probe.maxTokens` | max generated tokens for the probe, default `64` |
@@ -74,7 +74,6 @@ cp config.yaml.example config.yaml
 |---|---|
 | `watchdog.enable` | whether enabled, default `false` |
 | `watchdog.interval` | `/slots` sampling interval in seconds, default `2` (frequent sampling to detect early) |
-| `watchdog.apiKey` | backend API key; sent as `Bearer <key>` when sampling `/slots` (not used by normal proxying), default empty |
 | `watchdog.maxRate` | max generation speed (t/s); the average speed within a sample interval above this counts as one over-speed sample, default `200` |
 | `watchdog.times` | consecutive over-speed samples required to declare unhealthy and run the command, default `2` |
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
