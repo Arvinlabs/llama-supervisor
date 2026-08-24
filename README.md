@@ -4,6 +4,7 @@ Go reverse proxy with idle health probing, automatic restart, a speed watchdog, 
 
 - `probe.enable: true`: after being idle for `probe.interval` seconds, the next request triggers a probe of the backend llama server before proxying. If the tail characters keep repeating during streaming, the backend is considered unhealthy, `probe.command` runs, and then the request is proxied.
 - `restart.enable: true`: an independent background check. Timing starts after the first request; as long as requests keep coming the window extends. Once idle for `restart.interval` seconds, `restart.command` runs directly without waiting for a request. After a trigger, timing is paused: no requests means no timing, and a new request restarts the timer.
+- `watchdog.enable: true`: an independent background sampler that polls the backend `/slots` every `watchdog.interval` seconds. If the generation speed stays above `watchdog.maxRate` t/s for `watchdog.times` consecutive samples, the backend is assumed to be stuck in an output loop and `watchdog.command` runs.
 - `request.prefixCache: true`: normalize `/v1/chat/completions` request bodies before proxying to maximize the backend prefix cache hit rate — the tools list is sorted by tool name (`function.name` / `custom.name` per the OpenAI spec) and all JSON object keys (including tool parameter schemas) are re-emitted in sorted order, so semantically identical requests produce identical bytes.
 
 ## Features
@@ -33,7 +34,7 @@ make build
 cp config.yaml.example config.yaml
 ```
 
-**Basic**
+### basic
 
 | Field | Description |
 |---|---|
@@ -41,20 +42,12 @@ cp config.yaml.example config.yaml
 | `backend` | backend address, e.g. `http://127.0.0.1:8081` |
 | `apiKey` | global backend API key, sent as `Bearer <key>` on probe and `/slots` sampling requests (not used by normal proxying), default empty |
 | `startupCommand` | shell command run synchronously at startup |
+| `probe` | probe config object, enabled with `enable: true`, see below |
 | `restart` | restart config object, enabled with `enable: true`, see below |
-| `probe` | backend probe config object, enabled with `enable: true`, see below |
-| `watchdog` | speed watchdog config object, enabled with `enable: true`, see below |
+| `watchdog` | watchdog config object, enabled with `enable: true`, see below |
 | `request` | request policy config object, see below |
 
-**restart**
-
-| Field | Description |
-|---|---|
-| `restart.enable` | whether enabled, default `false` |
-| `restart.interval` | trigger after being idle this many seconds, default `600` |
-| `restart.command` | shell command run on idle timeout, e.g. restarting llama |
-
-**probe**
+### probe
 
 | Field | Description |
 |---|---|
@@ -68,7 +61,15 @@ cp config.yaml.example config.yaml
 | `probe.successLimit` | once normal content reaches this many cumulative characters, the backend is declared healthy early and the probe ends without waiting for generation to finish, default `20` (negative disables) |
 | `probe.timeout` | probe timeout in seconds, default `5` |
 
-**watchdog**
+### restart
+
+| Field | Description |
+|---|---|
+| `restart.enable` | whether enabled, default `false` |
+| `restart.interval` | trigger after being idle this many seconds, default `600` |
+| `restart.command` | shell command run on idle timeout, e.g. restarting llama |
+
+### watchdog
 
 | Field | Description |
 |---|---|
@@ -79,7 +80,7 @@ cp config.yaml.example config.yaml
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |
 
-**request (request policy)**
+### request
 
 | Field | Description |
 |---|---|

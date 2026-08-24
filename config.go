@@ -42,9 +42,9 @@ func (g *ProbeGroup) Enabled() bool {
 type WatchdogGroup struct {
 	Enable   bool    `yaml:"enable"`   // whether enabled
 	Interval int     `yaml:"interval"` // sampling interval in seconds, default 2
-	Verbose  bool    `yaml:"verbose"`  // whether to log the measured speed on normal windows, default false
 	MaxRate  float64 `yaml:"maxRate"`  // max generation speed (t/s); above it is declared unhealthy (output loop), default 200
 	Times    int     `yaml:"times"`    // consecutive over-speed samples required to declare unhealthy, default 1
+	Verbose  bool    `yaml:"verbose"`  // whether to log the measured speed on normal windows, default false
 	Command  string  `yaml:"command"`  // shell command run after declaring unhealthy
 }
 
