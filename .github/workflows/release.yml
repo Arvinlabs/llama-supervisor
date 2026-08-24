@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run tests
+        run: make test
+
+      - name: Build all binaries
+        run: make build-all
+
+      - name: Create release archives
+        run: make release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/llama-supervisor-linux-amd64.tar.gz
+            dist/llama-supervisor-linux-arm64.tar.gz
+            dist/llama-supervisor-darwin-amd64.tar.gz
+            dist/llama-supervisor-darwin-arm64.tar.gz
+          generate_release_notes: true

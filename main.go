@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +21,24 @@ import (
 	"time"
 )
 
-var cfgPath = flag.String("config", "config.yaml", "path to the config file")
+// Version information set during build via -ldflags (see Makefile)
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
+var (
+	cfgPath = flag.String("config", "config.yaml", "path to the config file")
+	showVer = flag.Bool("version", false, "print version information and exit")
+)
+
+// printVersion prints the build version information
+func printVersion() {
+	fmt.Printf("llama-supervisor %s\n", Version)
+	fmt.Printf("Build Time: %s\n", BuildTime)
+	fmt.Printf("Go Version: %s\n", runtime.Version())
+	fmt.Printf("Platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+}
 
 // proxy is the reverse proxy with idle restart and probe logic attached
 type proxy struct {
@@ -282,6 +301,10 @@ func runCommand(ctx context.Context, label, cmdStr string) bool {
 
 func main() {
 	flag.Parse()
+	if *showVer {
+		printVersion()
+		return
+	}
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
@@ -291,6 +314,7 @@ func main() {
 	ctx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
 
+	log.Printf("llama-supervisor %s (built %s, %s)", Version, BuildTime, runtime.Version())
 	log.Print("[config] apiKey=" + secretMask(cfg.ApiKey))
 
 	if cfg.Restart.Enabled() {

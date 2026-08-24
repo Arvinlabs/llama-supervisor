@@ -25,8 +25,17 @@ Go reverse proxy with idle health probing, automatic restart, a speed watchdog, 
 
 ```bash
 make build
-./llama-supervisor -config config.yaml   # default: ./config.yaml
+./dist/llama-supervisor -config config.yaml   # default: ./config.yaml
+./dist/llama-supervisor --version             # version, build time, go version, platform
 ```
+
+## Release
+
+Builds embed the git tag as the version (via `-ldflags`), also logged at startup. Cross-compilation targets, release archives and the GitHub Actions workflows (CI on push/PR, auto release on `vX.Y.Z` tags) are described in `BUILD.md`.
+
+- releases: <https://github.com/Arvinlabs/llama-supervisor/releases>
+- interactive release script: `./scripts/release.sh` (bumps a version tag, pushes, Actions publishes)
+- version info: `./scripts/version.sh`
 
 ## Configuration
 
