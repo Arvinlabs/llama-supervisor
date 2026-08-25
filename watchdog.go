@@ -16,7 +16,7 @@ type watchdogConfig struct {
 	interval time.Duration // sampling interval in seconds, default 2 (frequent sampling to catch fast output loops early)
 	maxRate  float64       // max generation speed (t/s); above it is declared unhealthy, default 300
 	times    int           // consecutive over-speed samples required to declare unhealthy, default 2
-	pause    time.Duration // how long to fully pause (no fetching) after a trigger or a /slots fetch failure, default 90s
+	pause    time.Duration // how long to fully pause (no fetching) after a trigger or a /slots fetch failure, default 30s
 	command  string        // shell command run after declaring unhealthy
 	verbose  bool          // whether to log the measured speed on normal windows, default false
 }
@@ -27,7 +27,7 @@ func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
 		interval: 2 * time.Second,
 		maxRate:  300,
 		times:    2,
-		pause:    90 * time.Second,
+		pause:    30 * time.Second,
 		command:  g.Command,
 		verbose:  g.Verbose,
 	}

@@ -48,8 +48,8 @@ watchdog:
   maxRate: 300
   # consecutive over-speed samples required to declare unhealthy, default 2
   times: 2
-  # seconds the watchdog fully pauses (no /slots fetching at all) after a trigger or a /slots fetch failure, default 90
-  pause: 90
+  # seconds the watchdog fully pauses (no /slots fetching at all) after a trigger or a /slots fetch failure, default 30
+  pause: 30
   # whether to log the measured speed on normal windows, default false
   verbose: false
   # command to run after declaring unhealthy

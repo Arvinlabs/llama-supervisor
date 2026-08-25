@@ -261,7 +261,7 @@ func TestWatchdogTickFetchFailResetsStreak(t *testing.T) {
 
 func TestBuildWatchdogConfigDefaults(t *testing.T) {
 	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true})
-	if wc.interval != 2*time.Second || wc.maxRate != 300 || wc.times != 2 || wc.pause != 90*time.Second || wc.command != "" || wc.verbose {
+	if wc.interval != 2*time.Second || wc.maxRate != 300 || wc.times != 2 || wc.pause != 30*time.Second || wc.command != "" || wc.verbose {
 		t.Fatalf("unexpected defaults: %+v", wc)
 	}
 }

@@ -7,43 +7,47 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// object keys in the normalized body must be sorted at every level (Go marshals maps with sorted keys)
-func TestNormalizeChatCompletionsSortedKeys(t *testing.T) {
-	in := []byte(`{"stream":true,"model":"m","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := normalizeChatCompletions(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := keyOrder(t, out)
-	want := []string{"max_tokens", "messages", "model", "stream"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("top-level key order = %v, want %v", got, want)
+// without a tools array the body must pass through byte-identical: key order,
+// number literal forms and whitespace are never touched
+func TestNormalizeChatCompletionsNoToolsUnchanged(t *testing.T) {
+	in := []byte(`{"stream":true, "model":"m","temperature":1.0,"top_p":0.900,"max_tokens":1e3,
+"messages":[{"role":"user","content":"<script> a & b </script> 你好, 世界"}]}`)
+	out := normalizeChatCompletions(in)
+	if !bytes.Equal(out, in) {
+		t.Fatalf("body without tools must be byte-identical:\n%s\n%s", in, out)
 	}
 }
 
-// the tools list is sorted by function name and tool parameter schema keys are sorted
-func TestNormalizeChatCompletionsSortsTools(t *testing.T) {
-	in := []byte(`{"model":"m","tools":[` +
-		`{"type":"function","function":{"name":"zebra","description":"z","parameters":{"type":"object","properties":{"b":{},"a":{}}}}},` +
+// the tools array is fully canonicalized: elements sorted by function name, keys
+// sorted inside elements, numbers in shortest form, no HTML escaping; bytes outside
+// the tools array are untouched
+func TestNormalizeChatCompletionsOnlyToolsTouched(t *testing.T) {
+	in := []byte(`{"model":"m","temperature":1.0,"tools":[` +
+		`{"type":"function","function":{"name":"zebra","description":"z <q> & r","parameters":{"type":"object","properties":{"b":1.0,"a":2}}}},` +
 		`{"type":"function","function":{"name":"alpha","description":"a","parameters":{"type":"object","properties":{"y":{},"x":{}}}}}` +
 		`],"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := normalizeChatCompletions(in)
-	if err != nil {
-		t.Fatal(err)
+	out := normalizeChatCompletions(in)
+	// bytes outside the tools array are untouched
+	if !strings.Contains(string(out), `"temperature":1.0`) {
+		t.Fatalf("bytes outside tools must be preserved: %s", out)
 	}
+	// elements re-encoded canonically: all keys sorted, 1.0 -> 1, < and & NOT escaped
+	if !strings.Contains(string(out), `{"function":{"description":"a","name":"alpha","parameters":{"properties":{"x":{},"y":{}},"type":"object"}},"type":"function"}`) {
+		t.Fatalf("alpha element not canonical: %s", out)
+	}
+	if !strings.Contains(string(out), `{"function":{"description":"z <q> & r","name":"zebra","parameters":{"properties":{"a":2,"b":1},"type":"object"}},"type":"function"}`) {
+		t.Fatalf("zebra element not canonical: %s", out)
+	}
+	// order: alpha before zebra
 	var req struct {
 		Tools []struct {
 			Function struct {
-				Name       string `json:"name"`
-				Parameters struct {
-					Properties map[string]any `json:"properties"`
-				} `json:"parameters"`
+				Name string `json:"name"`
 			} `json:"function"`
 		} `json:"tools"`
 	}
@@ -51,26 +55,21 @@ func TestNormalizeChatCompletionsSortsTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(req.Tools) != 2 || req.Tools[0].Function.Name != "alpha" || req.Tools[1].Function.Name != "zebra" {
-		t.Fatalf("tools not sorted by function name: %+v", req.Tools)
+		t.Fatalf("tools not sorted by function name: %s", out)
 	}
-	// parameter keys sorted: in the raw bytes "x" must come before "y", "a" before "b"
-	s := string(out)
-	if !strings.Contains(s, `"x":{},"y":{}`) || !strings.Contains(s, `"a":{},"b":{}`) {
-		t.Fatalf("tool parameter keys not sorted: %s", s)
+	if !bytes.HasSuffix(out, []byte(`],"messages":[{"role":"user","content":"hi"}]}`)) {
+		t.Fatalf("bytes after the tools array were altered: %s", out)
 	}
 }
 
-// custom tools (type "custom") carry the name under custom.name and must sort with function tools
+// custom tools (type "custom") carry the name under custom.name and sort with function tools
 func TestNormalizeChatCompletionsSortsCustomTools(t *testing.T) {
 	in := []byte(`{"model":"m","tools":[` +
 		`{"type":"custom","custom":{"name":"zeta","format":{"type":"text"}}},` +
 		`{"type":"function","function":{"name":"mid","parameters":{"type":"object"}}},` +
 		`{"type":"custom","custom":{"name":"alpha","format":{"type":"text"}}}` +
-		`],"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := normalizeChatCompletions(in)
-	if err != nil {
-		t.Fatal(err)
-	}
+		`],"messages":[]}`)
+	out := normalizeChatCompletions(in)
 	var req struct {
 		Tools []struct {
 			Type   string `json:"type"`
@@ -94,19 +93,34 @@ func TestNormalizeChatCompletionsSortsCustomTools(t *testing.T) {
 		if tl.Type == "function" {
 			name = tl.Function.Name
 		}
-		typ, ok := want[name]
-		if !ok || tl.Type != typ {
+		if typ, ok := want[name]; !ok || tl.Type != typ {
 			t.Fatalf("tools[%d] = %s/%s, want %s: %s", i, tl.Type, name, typ, out)
 		}
 	}
 }
 
-// message order is semantically significant and must be preserved
-func TestNormalizeChatCompletionsPreservesMessages(t *testing.T) {
-	in := []byte(`{"model":"m","messages":[{"role":"user","content":"second"},{"role":"system","content":"first"}]}`)
-	out, err := normalizeChatCompletions(in)
-	if err != nil {
-		t.Fatal(err)
+// semantically identical tools lists — different element order, key order inside
+// elements, number literal forms and whitespace — must all normalize to identical
+// bytes; message order and content are always preserved
+func TestNormalizeChatCompletionsCanonicalForm(t *testing.T) {
+	m := `],"messages":[{"role":"user","content":"second"},{"role":"system","content":"first"}]}`
+	vars := `{"type":"object","properties":{"scale":1.0}}`
+	varsAlt := `{"type":"object","properties":{"scale":1}}`
+	bodies := []string{
+		`{"model":"m","tools":[` +
+			`{"type":"function","function":{"name":"b","parameters":` + vars + `}},` +
+			`{"type":"function","function":{"name":"a","parameters":` + vars + `}}` + m,
+		`{"model":"m","tools":[
+			{"type":"function","function":{"parameters":` + varsAlt + `,"name":"a"}},
+			{"function":{"name":"b","parameters":` + vars + `},"type":"function"}
+		` + m,
+	}
+	first := normalizeChatCompletions([]byte(bodies[0]))
+	for i, b := range bodies[1:] {
+		got := normalizeChatCompletions([]byte(b))
+		if !bytes.Equal(first, got) {
+			t.Fatalf("bodies %d and %d must normalize identically:\n%s\n%s", 0, i+1, first, got)
+		}
 	}
 	var req struct {
 		Messages []struct {
@@ -114,7 +128,7 @@ func TestNormalizeChatCompletionsPreservesMessages(t *testing.T) {
 			Content string `json:"content"`
 		} `json:"messages"`
 	}
-	if err := json.Unmarshal(out, &req); err != nil {
+	if err := json.Unmarshal(first, &req); err != nil {
 		t.Fatal(err)
 	}
 	if len(req.Messages) != 2 || req.Messages[0].Content != "second" || req.Messages[1].Content != "first" {
@@ -122,27 +136,84 @@ func TestNormalizeChatCompletionsPreservesMessages(t *testing.T) {
 	}
 }
 
-// semantically identical requests with different tools/key order produce identical bytes
-func TestNormalizeChatCompletionsCanonicalForm(t *testing.T) {
-	a := []byte(`{"model":"m","tools":[{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"p":{}}}}}],"messages":[{"role":"user","content":"hi"}]}`)
-	b := []byte(`{"messages":[{"role":"user","content":"hi"}],"model":"m","tools":[{"type":"function","function":{"parameters":{"properties":{"p":{}},"type":"object"},"name":"a"}}]}`)
-	oa, err := normalizeChatCompletions(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ob, err := normalizeChatCompletions(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(oa, ob) {
-		t.Fatalf("canonical forms differ:\n%s\n%s", oa, ob)
+// an already-canonical tools array (sorted names, sorted keys, bare "," separators)
+// leaves the body byte-identical
+func TestNormalizeChatCompletionsAlreadySortedUnchanged(t *testing.T) {
+	in := []byte(`{"model":"m","tools":[{"function":{"name":"a"},"type":"function"},{"function":{"name":"b"},"type":"function"}],"messages":[]}`)
+	out := normalizeChatCompletions(in)
+	if !bytes.Equal(out, in) {
+		t.Fatalf("already-canonical body must be byte-identical:\n%s\n%s", in, out)
 	}
 }
 
-// invalid JSON must fail (modifyRequest then passes the body through unchanged)
-func TestNormalizeChatCompletionsInvalidJSON(t *testing.T) {
-	if _, err := normalizeChatCompletions([]byte(`{"model":`)); err == nil {
-		t.Fatal("expected error for invalid JSON")
+// a single already-canonical element and an empty tools array are left unchanged
+func TestNormalizeChatCompletionsShortToolsUnchanged(t *testing.T) {
+	for _, in := range [][]byte{
+		[]byte(`{"model":"m","tools":[{"function":{"name":"a"},"type":"function"}],"messages":[]}`),
+		[]byte(`{"model":"m","tools":[],"messages":[]}`),
+	} {
+		if out := normalizeChatCompletions(in); !bytes.Equal(out, in) {
+			t.Fatalf("body must be unchanged:\n%s\n%s", in, out)
+		}
+	}
+}
+
+// a "tools" key nested deeper (or inside a string) must not match: only the
+// top-level tools array is sortable
+func TestNormalizeChatCompletionsNestedToolsIgnored(t *testing.T) {
+	for _, in := range [][]byte{
+		[]byte(`{"model":"m","tools":[{"function":{"name":"b"},"type":"function"}],"messages":[{"role":"user","content":"tools":[{"name":"x"}]}]}`),
+		[]byte(`{"model":"m","metadata":{"tools":[1,2]},"messages":[]}`),
+		[]byte(`{"model":"m","other":{"tools":[{"name":"x"},{"name":"y"}]},"messages":[]}`),
+	} {
+		if out := normalizeChatCompletions(in); !bytes.Equal(out, in) {
+			t.Fatalf("nested/string tools must not be touched:\n%s\n%s", in, out)
+		}
+	}
+}
+
+// malformed bodies (invalid JSON, trailing data, unterminated tools array) pass
+// through unchanged
+func TestNormalizeChatCompletionsMalformedUnchanged(t *testing.T) {
+	for _, in := range [][]byte{
+		[]byte(`{"model":`),
+		[]byte(`{"model":"m"} junk`),
+		[]byte(`{"model":"m","tools":[{"type":"function"`),
+		[]byte(`no json at all`),
+	} {
+		if out := normalizeChatCompletions(in); !bytes.Equal(out, in) {
+			t.Fatalf("malformed body must be unchanged:\n%s\n%s", in, out)
+		}
+	}
+}
+
+// a tools array with invalid UTF-8 is left unchanged (re-encoding would replace the
+// bytes with U+FFFD and corrupt the prompt); invalid UTF-8 OUTSIDE the tools array
+// does not prevent the tools from being normalized
+func TestNormalizeChatCompletionsInvalidUTF8(t *testing.T) {
+	toolsInvalid := []byte(`{"tools":[{"type":"function","function":{"name":"b","description":"caf\xE9"}},{"type":"function","function":{"name":"a"}}],"messages":[]}`)
+	if out := normalizeChatCompletions(toolsInvalid); !bytes.Equal(out, toolsInvalid) {
+		t.Fatalf("tools with invalid UTF-8 must be unchanged: %s", out)
+	}
+	toolsValid := []byte(`{"tools":[{"type":"function","function":{"name":"b"}},{"type":"function","function":{"name":"a"}}],"messages":[{"content":"caf\xE9"}]}`)
+	out := normalizeChatCompletions(toolsValid)
+	// invalid bytes outside the tools array are preserved verbatim
+	if !bytes.Contains(out, []byte(`"content":"caf\xE9"`)) {
+		t.Fatalf("non-UTF-8 bytes outside tools must be preserved: %s", out)
+	}
+	// and the tools array is still normalized
+	if !strings.Contains(string(out), `{"function":{"name":"a"},"type":"function"},{"function":{"name":"b"`) {
+		t.Fatalf("tools not sorted: %s", out)
+	}
+}
+
+// unicode-escaped key spelling (\u0074ools) is recognized as the top-level tools key
+func TestNormalizeChatCompletionsEscapedKey(t *testing.T) {
+	in := []byte(`{"\u0074ools":[{"type":"function","function":{"name":"b"}},{"type":"function","function":{"name":"a"}}],"model":"m"}`)
+	out := normalizeChatCompletions(in)
+	// the original \u0074ools key spelling must be preserved and the array sorted
+	if !strings.HasPrefix(string(out), `{"\u0074ools":[{"function":{"name":"a"},"type":"function"},`) {
+		t.Fatalf("escaped tools key not sorted / key spelling changed: %s", out)
 	}
 }
 
@@ -151,7 +222,7 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 	c := newPrefixCachePolicy()
 
 	t.Run("normalizes chat completions", func(t *testing.T) {
-		body := `{"model":"m","tools":[{"type":"function","function":{"name":"b","parameters":{"type":"object","properties":{"q":{}}}}},{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"q":{}}}}}],"messages":[{"role":"user","content":"hi"}]}`
+		body := `{"model":"m","tools":[{"type":"function","function":{"name":"b","parameters":{"type":"object","properties":{"q":{}}}}},{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"q":{}}}}}], "temperature": 1.0, "messages":[{"role":"user","content":"hi"}]}`
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		c.modifyRequest(r)
@@ -171,12 +242,17 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 					Name string `json:"name"`
 				} `json:"function"`
 			} `json:"tools"`
+			Temperature float64 `json:"temperature"`
 		}
 		if err := json.Unmarshal(got, &req); err != nil {
 			t.Fatal(err)
 		}
 		if len(req.Tools) != 2 || req.Tools[0].Function.Name != "a" || req.Tools[1].Function.Name != "b" {
-			t.Fatalf("tools not sorted: %+v", req.Tools)
+			t.Fatalf("tools not sorted: %s", got)
+		}
+		// bytes outside the tools array stay as the client sent them
+		if !strings.Contains(string(got), `"temperature": 1.0, `) {
+			t.Fatalf("whitespace/number form outside tools must be preserved: %s", got)
 		}
 	})
 
@@ -223,7 +299,8 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 	})
 }
 
-// end-to-end: with the prefix cache modifier enabled the proxy forwards the normalized body to the backend
+// end-to-end: with the prefix cache modifier enabled the proxy sorts the tools but
+// forwards every other byte exactly as the client sent it
 func TestProxyForwardsNormalizedBody(t *testing.T) {
 	var backendBody []byte
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,7 +310,8 @@ func TestProxyForwardsNormalizedBody(t *testing.T) {
 	defer backend.Close()
 
 	sup := newBackendProxy(Config{Backend: backend.URL, Request: &RequestGroup{PrefixCache: true}}, context.Background())
-	body := `{"model":"m","tools":[{"type":"function","function":{"name":"z","parameters":{"type":"object","properties":{"b":{},"a":{}}}}},{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"c":{}}}}}],"messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"m","temperature":0.700,"tools":[{"type":"function","function":{"name":"z","parameters":{"type":"object","properties":{"b":1.0,"a":2}}},"description":"z"},
+	{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"c":{}}},"description":"a"}}],"messages":[{"role":"user","content":"hi"}]}`
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -242,50 +320,20 @@ func TestProxyForwardsNormalizedBody(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	var req struct {
-		Tools []struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
+	// tools are sorted (a before z) and elements re-encoded canonically:
+	// properties sorted, 1.0 -> 1
+	if !strings.Contains(string(backendBody), `"a":2,"b":1`) {
+		t.Fatalf("tool elements not canonicalized: %s", backendBody)
 	}
-	if err := json.Unmarshal(backendBody, &req); err != nil {
-		t.Fatalf("backend body not JSON: %v: %s", err, backendBody)
+	// number literal form outside the tools array stays exactly as sent
+	if !strings.Contains(string(backendBody), `"temperature":0.700`) {
+		t.Fatalf("number literal outside tools was altered: %s", backendBody)
 	}
-	if len(req.Tools) != 2 || req.Tools[0].Function.Name != "a" || req.Tools[1].Function.Name != "z" {
+	// order check: the alpha tool object must appear before the zebra one
+	s := string(backendBody)
+	ia := strings.Index(s, `"name":"a"`)
+	iz := strings.Index(s, `"name":"z"`)
+	if ia < 0 || iz < 0 || ia > iz {
 		t.Fatalf("backend received unsorted tools: %s", backendBody)
 	}
-	if s := string(backendBody); !strings.Contains(s, `"name":"z","parameters":{"properties":{"a":{},"b":{}},"type":"object"`) {
-		t.Fatalf("backend received unsorted keys: %s", s)
-	}
-}
-
-// keyOrder returns the object key order of a top-level JSON object
-func keyOrder(t *testing.T, data []byte) []string {
-	t.Helper()
-	dec := json.NewDecoder(bytes.NewReader(data))
-	tok, err := dec.Token()
-	if err != nil {
-		t.Fatalf("first token: %v", err)
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		t.Fatalf("expected top-level object, got %v", tok)
-	}
-	var keys []string
-	for dec.More() {
-		ktok, err := dec.Token()
-		if err != nil {
-			t.Fatalf("key token: %v", err)
-		}
-		k, ok := ktok.(string)
-		if !ok {
-			t.Fatalf("expected object key")
-		}
-		keys = append(keys, k)
-		var v any
-		if err := dec.Decode(&v); err != nil {
-			t.Fatalf("decode value: %v", err)
-		}
-	}
-	return keys
 }
