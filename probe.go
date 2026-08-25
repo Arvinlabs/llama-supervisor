@@ -72,14 +72,16 @@ type probePolicy struct {
 	cmd     string
 	backend string
 	probe   probeConfig
+	guard   *streamGuard // arms the restart window so in-flight streams get an SSE error event
 }
 
-func newProbePolicy(ctx context.Context, backend string, g *ProbeGroup, interval time.Duration, apiKey string) *probePolicy {
+func newProbePolicy(ctx context.Context, backend string, g *ProbeGroup, interval time.Duration, apiKey string, guard *streamGuard) *probePolicy {
 	p := &probePolicy{
 		ctx:     ctx,
 		cmd:     g.Command,
 		backend: backend,
 		probe:   buildProbeConfig(g, apiKey),
+		guard:   guard,
 	}
 	p.tracker = newIdleTracker(interval, func(ctx context.Context) bool {
 		return p.runProbe(ctx)
@@ -110,6 +112,7 @@ func (p *probePolicy) runProbe(ctx context.Context) bool {
 		log.Print("[probe] no command configured, skip")
 		return false
 	}
+	armRestart(p.guard)
 	return runCommand(ctx, "health", p.cmd)
 }
 

@@ -58,7 +58,7 @@ func TestWatchdogTickDefaultTimes(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "", newStreamGuard())
 
 	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(105)
@@ -86,7 +86,7 @@ func TestWatchdogTickTriggersAfterTwoFast(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "", newStreamGuard())
 
 	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(200)
@@ -110,7 +110,7 @@ func TestWatchdogTickPauseWindow(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Pause: 90, Command: ""}, srv.URL, "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Pause: 90, Command: ""}, srv.URL, "", newStreamGuard())
 
 	p.tick(t.Context()) // baseline, 1 fetch
 	h.nDecoded.Store(200)
@@ -151,7 +151,7 @@ func TestWatchdogTickRecovers(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "", newStreamGuard())
 
 	p.tick(t.Context())
 	h.nDecoded.Store(200)
@@ -171,7 +171,7 @@ func TestWatchdogTickIdle(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "", newStreamGuard())
 
 	p.tick(t.Context())
 	p.tick(t.Context())
@@ -230,7 +230,7 @@ func TestFetchSlotsRealShape(t *testing.T) {
 
 // a /slots fetch failure must not affect the baseline
 func TestWatchdogTickFetchFail(t *testing.T) {
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, "http://127.0.0.1:1", "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, "http://127.0.0.1:1", "", newStreamGuard())
 	p.prev = watchdogState{processing: true, nDecoded: 100}
 	p.tick(t.Context())
 	if p.prev.nDecoded != 100 {
@@ -241,7 +241,7 @@ func TestWatchdogTickFetchFail(t *testing.T) {
 // a /slots fetch failure breaks the over-speed streak (later non-consecutive fast samples must
 // not trigger) and opens a pause window for the configured pause duration
 func TestWatchdogTickFetchFailResetsStreak(t *testing.T) {
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Pause: 90, Command: ""}, "http://127.0.0.1:1", "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Pause: 90, Command: ""}, "http://127.0.0.1:1", "", newStreamGuard())
 	p.prev = watchdogState{processing: true, nDecoded: 100}
 	p.wedges = 1        // previous sample was over speed, 1/2
 	p.tick(t.Context()) // fetch fails: streak broken, pause window opened

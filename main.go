@@ -50,6 +50,7 @@ type proxy struct {
 	probe    *probePolicy    // probe policy (nil when probe is disabled)
 	watchdog *watchdogPolicy // watchdog policy (nil when watchdog is disabled)
 	request  *requestPolicy  // request policy (nil when no request sub-feature is enabled)
+	guard    *streamGuard    // shared guard: injects an SSE error event into streams killed by a backend restart
 }
 
 // newBackendProxy creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -86,7 +87,18 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	// would stay blocked on the backend stream read and the backend would keep generating
 	rp.ModifyResponse = func(res *http.Response) error {
 		cb := &ctxBody{ctx: res.Request.Context(), rc: res.Body, quit: make(chan struct{})}
-		res.Body = cb
+		// only SSE chat completion streams can receive the injected error event; any other
+		// response (non-stream JSON, /completion, /slots, ...) keeps the plain body.
+		// the client ResponseWriter was attached to the request context in ServeHTTP
+		if res.Body != nil && shouldInjectStreamError(res) {
+			var writer io.Writer
+			if w, ok := res.Request.Context().Value(clientWriterKey).(http.ResponseWriter); ok {
+				writer = w
+			}
+			res.Body = &guardBody{guard: p.guard, inner: cb, writer: writer, ctx: res.Request.Context()}
+		} else {
+			res.Body = cb
+		}
 		cb.watch()
 		return nil
 	}
@@ -102,14 +114,15 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
 	}
 
+	p.guard = newStreamGuard()
 	if cfg.Restart.Enabled() {
-		p.restart = newRestartPolicy(cfg.Restart, restartInterval(cfg))
+		p.restart = newRestartPolicy(cfg.Restart, restartInterval(cfg), p.guard)
 	}
 	if cfg.Probe.Enabled() {
-		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg), cfg.ApiKey)
+		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg), cfg.ApiKey, p.guard)
 	}
 	if cfg.Watchdog.Enabled() {
-		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
+		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend, cfg.ApiKey, p.guard)
 	}
 	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil {
 		log.Print("[config] restart, probe, watchdog and request all disabled, proxying only")
@@ -204,8 +217,10 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// On client disconnect: the request ctx is canceled -> ctxBody closes the backend connection ->
 	// the backend read is interrupted, and "client disconnected" is logged from ctxBody/ErrorHandler.
 	// Note: r.Context().Err() must not be used here to detect this, because net/http also cancels
-	// the ctx after the handler returns normally, which would be a false positive
-	p.proxy.ServeHTTP(rec, r)
+	// the ctx after the handler returns normally, which would be a false positive.
+	// Attach rec to the request context so the proxy hooks can reach the client ResponseWriter
+	// (ReverseProxy does not expose it through the response)
+	p.proxy.ServeHTTP(rec, r.WithContext(context.WithValue(ctx, clientWriterKey, rec)))
 	logAccess(rec.status, r, start)
 }
 
@@ -241,6 +256,27 @@ func (p *proxy) startBackground(ctx context.Context) {
 			}
 		}()
 	}
+}
+
+// clientWriterKey is the context key under which the ResponseWriter serving the request is
+// exposed to the proxy hooks (the guard uses it to inject the SSE error event into the stream)
+type clientWriterKeyT int
+
+const clientWriterKey clientWriterKeyT = 0
+
+// streamErrorPath is the only proxied path eligible for the injected SSE error event:
+// the OpenAI-compatible chat completion endpoint
+const streamErrorPath = "/v1/chat/completions"
+
+// shouldInjectStreamError reports whether the response is an SSE chat completion stream
+// that can receive the injected error event: the path must be the chat completion endpoint
+// and the response must actually be a stream (stream:false responses are plain JSON, as are
+// all the other endpoints)
+func shouldInjectStreamError(res *http.Response) bool {
+	if res.Request.URL.Path != streamErrorPath {
+		return false
+	}
+	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
 }
 
 // logAccess logs one access line: client, method, path, status code, elapsed time

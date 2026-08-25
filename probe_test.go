@@ -206,7 +206,7 @@ func TestProbePolicySurvivesRequestCtxCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour, "")
+	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour, "", newStreamGuard())
 	// force the idle deadline to be due
 	p.tracker.mu.Lock()
 	p.tracker.deadline = time.Now().Add(-time.Second)

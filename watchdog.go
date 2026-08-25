@@ -75,14 +75,16 @@ type watchdogPolicy struct {
 	pauseUntil time.Time // fully paused (no fetching) before this moment
 	skipNext   bool      // after a pause the first sample only rebuilds the baseline (no rate check)
 	lastFail   string    // last fetch error message; only logged when it changes
+	guard      *streamGuard // arms the restart window so in-flight streams get an SSE error event
 }
 
-// newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey
-func newWatchdogPolicy(g *WatchdogGroup, backend string, apiKey string) *watchdogPolicy {
+// newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey; guard is the shared restart guard
+func newWatchdogPolicy(g *WatchdogGroup, backend string, apiKey string, guard *streamGuard) *watchdogPolicy {
 	return &watchdogPolicy{
 		config:  buildWatchdogConfig(g),
 		backend: backend,
 		apiKey:  apiKey,
+		guard:   guard,
 	}
 }
 
@@ -166,6 +168,9 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 		log.Print("[watchdog] no command configured, skip")
 		return
 	}
+	// arm the guard before stopping the backend: streams killed by the restart get an
+	// SSE error event injected when their connection ends, so the client sees the interruption
+	armRestart(w.guard)
 	runCommand(ctx, "watchdog", w.config.command)
 }
 
