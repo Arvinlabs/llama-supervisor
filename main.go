@@ -334,8 +334,8 @@ func main() {
 	}
 	if cfg.Watchdog.Enabled() {
 		wc := buildWatchdogConfig(cfg.Watchdog)
-		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d",
-			int(wc.interval.Seconds()), wc.maxRate, wc.times)
+		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d pause=%ds",
+			int(wc.interval.Seconds()), wc.maxRate, wc.times, int(wc.pause.Seconds()))
 		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
 	} else {
 		log.Print("[config] watchdog disabled")

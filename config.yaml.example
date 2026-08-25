@@ -44,10 +44,12 @@ watchdog:
   enable: true
   # /slots sampling interval in seconds, default 2
   interval: 2
-  # max generation speed (t/s); above it is declared unhealthy (output loop), default 200
-  maxRate: 200
+  # max generation speed (t/s); above it is declared unhealthy (output loop), default 300
+  maxRate: 300
   # consecutive over-speed samples required to declare unhealthy, default 2
   times: 2
+  # seconds the watchdog fully pauses (no /slots fetching at all) after a trigger or a /slots fetch failure, default 90
+  pause: 90
   # whether to log the measured speed on normal windows, default false
   verbose: false
   # command to run after declaring unhealthy

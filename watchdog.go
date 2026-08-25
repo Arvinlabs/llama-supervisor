@@ -14,8 +14,9 @@ import (
 // watchdogConfig effective watchdog parameters (defaults filled in)
 type watchdogConfig struct {
 	interval time.Duration // sampling interval in seconds, default 2 (frequent sampling to catch fast output loops early)
-	maxRate  float64       // max generation speed (t/s); above it is declared unhealthy
+	maxRate  float64       // max generation speed (t/s); above it is declared unhealthy, default 300
 	times    int           // consecutive over-speed samples required to declare unhealthy, default 2
+	pause    time.Duration // how long to fully pause (no fetching) after a trigger or a /slots fetch failure, default 90s
 	command  string        // shell command run after declaring unhealthy
 	verbose  bool          // whether to log the measured speed on normal windows, default false
 }
@@ -24,8 +25,9 @@ type watchdogConfig struct {
 func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
 	wc := watchdogConfig{
 		interval: 2 * time.Second,
-		maxRate:  200,
+		maxRate:  300,
 		times:    2,
+		pause:    90 * time.Second,
 		command:  g.Command,
 		verbose:  g.Verbose,
 	}
@@ -37,6 +39,9 @@ func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
 	}
 	if g.Times > 0 {
 		wc.times = g.Times
+	}
+	if g.Pause > 0 {
+		wc.pause = time.Duration(g.Pause) * time.Second
 	}
 	return wc
 }
@@ -58,16 +63,18 @@ func decideFast(prev, cur watchdogState, elapsed time.Duration, maxRate float64)
 
 // watchdogPolicy watchdog strategy: sample the backend /slots frequently, and when the generation
 // speed keeps exceeding the threshold (very likely an output loop) run watchdog.command (similar to
-// restart); after a trigger one sample is skipped before resuming
+// restart); after a trigger or a /slots fetch failure the watchdog fully pauses (no fetching at
+// all) for pause seconds
 type watchdogPolicy struct {
-	mu       sync.Mutex
-	config   watchdogConfig
-	backend  string
-	apiKey   string // Bearer API key sent when sampling /slots (none when empty)
-	prev     watchdogState
-	wedges   int
-	paused   bool
-	lastFail string // last fetch error message; only logged when it changes
+	mu         sync.Mutex
+	config     watchdogConfig
+	backend    string
+	apiKey     string // Bearer API key sent when sampling /slots (none when empty)
+	prev       watchdogState
+	wedges     int
+	pauseUntil time.Time // fully paused (no fetching) before this moment
+	skipNext   bool      // after a pause the first sample only rebuilds the baseline (no rate check)
+	lastFail   string    // last fetch error message; only logged when it changes
 }
 
 // newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey
@@ -81,26 +88,40 @@ func newWatchdogPolicy(g *WatchdogGroup, backend string, apiKey string) *watchdo
 
 // tick performs one sample: fetch /slots, compare with the previous sample, and run the command
 // only after `times` consecutive over-speed samples to avoid a single burst triggering it;
-// after running, one sample is skipped (during restart) and the check restarts from the next sample
+// after a trigger (or a /slots fetch failure) the watchdog fully pauses for pause seconds
+// (no fetching at all), and the first sample after the pause only rebuilds the baseline
 func (w *watchdogPolicy) tick(ctx context.Context) {
+	w.mu.Lock()
+	if time.Now().Before(w.pauseUntil) { // fully paused: no fetch at all
+		w.mu.Unlock()
+		return
+	}
+	w.mu.Unlock()
+
 	state, err := fetchSlots(ctx, w.backend, w.apiKey)
 	if err != nil {
 		if msg := err.Error(); msg != w.lastFail {
 			log.Printf("[watchdog] fetch /slots failed: %v", err)
 			w.lastFail = msg
 		}
+		w.mu.Lock()
 		// a failed sample breaks the streak: the next over-speed sample cannot be
 		// consecutive with an earlier one, so reset the consecutive counter
-		w.mu.Lock()
 		w.wedges = 0
+		// start a full pause on a fresh failure (an active pause is not extended tick by tick)
+		if !time.Now().Before(w.pauseUntil) {
+			w.pauseUntil = time.Now().Add(w.config.pause)
+			w.skipNext = true
+			log.Printf("[watchdog] fully paused for %s after /slots fetch failure", w.config.pause)
+		}
 		w.mu.Unlock()
 		return
 	}
 	w.lastFail = ""
 
 	w.mu.Lock()
-	if w.paused { // skip one sample after the last trigger and reset the baseline
-		w.paused = false
+	if w.skipNext { // first sample after a pause: the gap makes a rate check meaningless, baseline only
+		w.skipNext = false
 		w.wedges = 0
 		w.prev = state
 		w.mu.Unlock()
@@ -136,8 +157,10 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 	log.Printf("[watchdog] abnormally fast: n_decoded %d -> %d (%.0f t/s > maxRate %gt/s), restarting backend",
 		prev.nDecoded, state.nDecoded, rate, w.config.maxRate)
 	w.mu.Lock()
-	w.paused = true
+	w.pauseUntil = time.Now().Add(w.config.pause)
 	w.wedges = 0
+	w.skipNext = true
+	log.Printf("[watchdog] fully paused for %s after trigger", w.config.pause)
 	w.mu.Unlock()
 	if w.config.command == "" {
 		log.Print("[watchdog] no command configured, skip")

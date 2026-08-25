@@ -36,9 +36,11 @@ func TestDecideFast(t *testing.T) {
 type slotsHandler struct {
 	nDecoded   atomic.Int64
 	processing atomic.Bool
+	reqs       atomic.Int64 // number of /slots requests served
 }
 
 func (s *slotsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.reqs.Add(1)
 	w.Header().Set("Content-Type", "application/json")
 	proc := "false"
 	if s.processing.Load() {
@@ -61,18 +63,18 @@ func TestWatchdogTickDefaultTimes(t *testing.T) {
 	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(105)
 	p.tick(t.Context()) // sample 2: 5 t/s < 10, normal
-	if p.paused {
+	if time.Now().Before(p.pauseUntil) {
 		t.Fatal("normal speed should not trigger")
 	}
 	h.nDecoded.Store(300)
 	p.tick(t.Context()) // sample 3: 195 t/s > 10, fast 1/2, no trigger
-	if p.paused {
+	if time.Now().Before(p.pauseUntil) {
 		t.Fatal("single fast sample should not trigger with default times=2")
 	}
 	h.nDecoded.Store(500)
 	p.tick(t.Context()) // sample 4: fast 2/2, trigger
-	if !p.paused {
-		t.Fatal("expected paused after two fast samples with default times=2")
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected pause window after two fast samples with default times=2")
 	}
 }
 
@@ -89,38 +91,55 @@ func TestWatchdogTickTriggersAfterTwoFast(t *testing.T) {
 	p.tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(200)
 	p.tick(t.Context()) // sample 2: fast 1/2
-	if p.paused {
+	if time.Now().Before(p.pauseUntil) {
 		t.Fatal("should not trigger on first fast sample")
 	}
 	h.nDecoded.Store(300)
 	p.tick(t.Context()) // sample 3: fast 2/2, trigger
-	if !p.paused {
-		t.Fatal("expected paused after two consecutive fast samples")
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected pause window after two consecutive fast samples")
 	}
 }
 
-// after a trigger one sample is skipped before resuming, and the baseline is reset
-func TestWatchdogTickPausesOnce(t *testing.T) {
+// after a trigger the watchdog fully pauses (no fetching at all); after the pause the first
+// sample only rebuilds the baseline, and the check then resumes and can re-trigger
+func TestWatchdogTickPauseWindow(t *testing.T) {
 	h := &slotsHandler{}
 	h.nDecoded.Store(100)
 	h.processing.Store(true)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Pause: 90, Command: ""}, srv.URL, "")
 
-	p.tick(t.Context())
+	p.tick(t.Context()) // baseline, 1 fetch
 	h.nDecoded.Store(200)
-	p.tick(t.Context()) // fast 1/2
+	p.tick(t.Context()) // fast 1/2, 2 fetches
 	h.nDecoded.Store(300)
-	p.tick(t.Context()) // fast 2/2 -> paused
-	h.nDecoded.Store(301)
-	p.tick(t.Context()) // paused: skip one and reset the baseline
-	if p.paused {
-		t.Fatal("expected unpaused after skip tick")
+	p.tick(t.Context()) // fast 2/2 -> fully paused, 3 fetches
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected full pause after trigger")
 	}
-	if p.prev.nDecoded != 301 {
-		t.Fatalf("expected baseline reset to 301, got %d", p.prev.nDecoded)
+	h.nDecoded.Store(900)
+	p.tick(t.Context()) // inside the pause: no fetch at all
+	if got := h.reqs.Load(); got != 3 {
+		t.Fatalf("expected no fetch during the pause, got %d requests", got)
+	}
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected still paused inside the pause window")
+	}
+	// simulate the pause expiring: the first sample only rebuilds the baseline
+	p.pauseUntil = time.Now().Add(-time.Second)
+	p.tick(t.Context()) // 4th fetch, baseline only (a 100 -> 900 jump must not count)
+	h.nDecoded.Store(2000)
+	p.tick(t.Context()) // 1100 t/s but only fast 1/2, no trigger
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("single fast sample after resume should not trigger")
+	}
+	h.nDecoded.Store(3000)
+	p.tick(t.Context()) // fast 2/2 after resume -> trigger again
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected re-trigger after two consecutive fast samples post-pause")
 	}
 }
 
@@ -141,7 +160,7 @@ func TestWatchdogTickRecovers(t *testing.T) {
 	p.tick(t.Context()) // back to normal speed, counter reset
 	h.nDecoded.Store(300)
 	p.tick(t.Context()) // another over-speed, only 1/2, no trigger
-	if p.paused {
+	if time.Now().Before(p.pauseUntil) {
 		t.Fatal("single fast window after recovery should not trigger")
 	}
 }
@@ -156,7 +175,7 @@ func TestWatchdogTickIdle(t *testing.T) {
 
 	p.tick(t.Context())
 	p.tick(t.Context())
-	if p.paused {
+	if time.Now().Before(p.pauseUntil) {
 		t.Fatal("idle backend should not trigger")
 	}
 }
@@ -219,27 +238,37 @@ func TestWatchdogTickFetchFail(t *testing.T) {
 	}
 }
 
-// a /slots fetch failure breaks the over-speed streak: later non-consecutive fast samples must not trigger
+// a /slots fetch failure breaks the over-speed streak (later non-consecutive fast samples must
+// not trigger) and opens a pause window for the configured pause duration
 func TestWatchdogTickFetchFailResetsStreak(t *testing.T) {
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, "http://127.0.0.1:1", "")
+	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Pause: 90, Command: ""}, "http://127.0.0.1:1", "")
 	p.prev = watchdogState{processing: true, nDecoded: 100}
-	p.wedges = 1 // previous sample was over speed, 1/2
-	p.tick(t.Context()) // fetch fails: streak broken
+	p.wedges = 1        // previous sample was over speed, 1/2
+	p.tick(t.Context()) // fetch fails: streak broken, pause window opened
 	if p.wedges != 0 {
 		t.Fatalf("expected streak reset on fetch failure, got wedges=%d", p.wedges)
+	}
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected pause window after fetch failure")
+	}
+	// a second consecutive failure must not extend the active pause window
+	until := p.pauseUntil
+	p.tick(t.Context())
+	if !p.pauseUntil.Equal(until) {
+		t.Fatal("active pause window must not be extended by consecutive failures")
 	}
 }
 
 func TestBuildWatchdogConfigDefaults(t *testing.T) {
 	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true})
-	if wc.interval != 2*time.Second || wc.maxRate != 200 || wc.times != 2 || wc.command != "" || wc.verbose {
+	if wc.interval != 2*time.Second || wc.maxRate != 300 || wc.times != 2 || wc.pause != 90*time.Second || wc.command != "" || wc.verbose {
 		t.Fatalf("unexpected defaults: %+v", wc)
 	}
 }
 
 func TestBuildWatchdogConfigOverrides(t *testing.T) {
-	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true, Interval: 5, MaxRate: 500, Times: 3, Command: "cmd", Verbose: true})
-	if wc.interval != 5*time.Second || wc.maxRate != 500 || wc.times != 3 || wc.command != "cmd" || !wc.verbose {
+	wc := buildWatchdogConfig(&WatchdogGroup{Enable: true, Interval: 5, MaxRate: 500, Times: 3, Pause: 30, Command: "cmd", Verbose: true})
+	if wc.interval != 5*time.Second || wc.maxRate != 500 || wc.times != 3 || wc.pause != 30*time.Second || wc.command != "cmd" || !wc.verbose {
 		t.Fatalf("unexpected overrides: %+v", wc)
 	}
 }
