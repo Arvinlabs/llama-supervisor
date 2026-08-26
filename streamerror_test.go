@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 // errBoom simulates the "unexpected EOF" the proxy hits when the backend connection is killed mid-stream
@@ -50,14 +50,10 @@ func (r *boomReader) Read(p []byte) (int, error) {
 
 func (r *boomReader) Close() error { return nil }
 
-// armed guard + stream-killing read error: the SSE error event is injected after the data already sent
-func TestGuardBodyInjectsOnErrorWhenArmed(t *testing.T) {
-	g := newStreamGuard()
-	g.arm()
-	defer g.disarm()
-
+// stream-killing read error: the SSE error event is injected after the data already sent
+func TestGuardBodyInjectsOnReadError(t *testing.T) {
 	var out strings.Builder
-	b := &guardBody{guard: g, inner: &boomReader{}, writer: &out}
+	b := &guardBody{inner: &boomReader{}, writer: &out}
 	for {
 		_, err := b.Read(make([]byte, 64))
 		if err != nil {
@@ -69,38 +65,18 @@ func TestGuardBodyInjectsOnErrorWhenArmed(t *testing.T) {
 	}
 }
 
-// not armed: a stream-killing error ends the stream without any injection (no false alarms for ordinary failures)
-func TestGuardBodyNoInjectWhenNotArmed(t *testing.T) {
-	g := newStreamGuard()
-	var out strings.Builder
-	b := &guardBody{guard: g, inner: &boomReader{}, writer: &out}
-	for {
-		_, err := b.Read(make([]byte, 64))
-		if err != nil {
-			break
-		}
-	}
-	if out.Len() != 0 {
-		t.Fatalf("expected no injection when not armed, got %q", out.String())
-	}
-}
-
-// clean EOF (the backend finished normally and sent [DONE]): no injection even when armed
+// clean EOF (the backend finished normally and sent [DONE]): no injection
 func TestGuardBodyNoInjectOnCleanEOF(t *testing.T) {
-	g := newStreamGuard()
-	g.arm()
-	defer g.disarm()
-
 	var out strings.Builder
 	inner := &ioReadCloser{r: strings.NewReader("data: [DONE]\n\n")}
-	b := &guardBody{guard: g, inner: inner, writer: &out}
+	b := &guardBody{inner: inner, writer: &out}
 	for {
 		_, err := b.Read(make([]byte, 64))
 		if err != nil {
 			break
 		}
 	}
-	if strings.Contains(out.String(), "event: error") {
+	if strings.Contains(out.String(), streamErrorEvent) {
 		t.Fatalf("clean stream end must not be injected, got %q", out.String())
 	}
 }
@@ -109,13 +85,9 @@ func TestGuardBodyNoInjectOnCleanEOF(t *testing.T) {
 // must not merge into the error event's data field: the leading blank line of the
 // injected event terminates it into its own (malformed) message event
 func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
-	g := newStreamGuard()
-	g.arm()
-	defer g.disarm()
-
 	var out strings.Builder
 	inner := &errReadCloser{remaining: []byte(`data: {"choices": partial`), err: errBoom}
-	b := &guardBody{guard: g, inner: inner, writer: &out}
+	b := &guardBody{inner: inner, writer: &out}
 	// emulate the ReverseProxy copy loop: forwarded bytes are written by the copy, not by Read
 	buf := make([]byte, 64)
 	for {
@@ -133,7 +105,7 @@ func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
 		t.Fatalf("truncated line should be sealed into its own event, got %q", s)
 	}
 	// and the error event stays well-formed with a clean JSON data field
-	idx := strings.Index(s, "event: error\n")
+	idx := strings.Index(s, `data: {"error"`)
 	if idx < 0 || !strings.HasPrefix(s[idx:], streamErrorEvent[len("\n\n"):]) {
 		t.Fatalf("error event should be well-formed after the truncated line, got %q", s[idx:])
 	}
@@ -141,18 +113,32 @@ func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
 
 // the error event is written at most once even if the reader keeps erroring
 func TestGuardBodyInjectsOnce(t *testing.T) {
-	g := newStreamGuard()
-	g.arm()
-	defer g.disarm()
-
 	var out strings.Builder
 	inner := &boomReader{}
-	b := &guardBody{guard: g, inner: inner, writer: &out}
+	b := &guardBody{inner: inner, writer: &out}
 	for i := 0; i < 3; i++ {
 		_, _ = b.Read(make([]byte, 64)) // keep reading past the error
 	}
 	if n := strings.Count(out.String(), streamErrorEvent); n != 1 {
 		t.Fatalf("expected exactly one error event, got %d", n)
+	}
+}
+
+// canceled request context (client disconnected): no injection even on read error
+func TestGuardBodyNoInjectWhenClientGone(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // simulate client already gone
+
+	var out strings.Builder
+	b := &guardBody{inner: &boomReader{}, writer: &out, ctx: ctx}
+	for {
+		_, err := b.Read(make([]byte, 64))
+		if err != nil {
+			break
+		}
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no injection when client is gone, got %q", out.String())
 	}
 }
 
@@ -195,9 +181,6 @@ func TestProxyInjectsErrorEventWhenStreamKilled(t *testing.T) {
 	if n == 0 {
 		t.Fatal("no initial stream data")
 	}
-	// the watchdog restart is in progress: arm the shared guard, then kill the backend connection
-	sup.guard.arm()
-	defer sup.guard.disarm()
 	close(kill)
 
 	// the stream ends abruptly here; everything remaining (including the injected event) comes first
@@ -236,31 +219,4 @@ func TestShouldInjectStreamError(t *testing.T) {
 	}
 }
 
-// a watchdog trigger arms the shared guard, so streams killed by the restart command are flagged to the client
-func TestWatchdogTriggerArmsGuard(t *testing.T) {
-	h := &slotsHandler{}
-	h.nDecoded.Store(100)
-	h.processing.Store(true)
-	srv := httptest.NewServer(h)
-	defer srv.Close()
 
-	g := newStreamGuard()
-	p := newWatchdogPolicy(&WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: "true"}, srv.URL, "", g)
-
-	p.tick(t.Context())        // baseline
-	h.nDecoded.Store(200)
-	p.tick(t.Context())        // fast 1/2
-	if g.armed() {
-		t.Fatal("guard must not arm before the trigger")
-	}
-	h.nDecoded.Store(300)
-	p.tick(t.Context()) // fast 2/2 -> trigger, command runs
-	if !g.armed() {
-		t.Fatal("expected the guard to be armed by the watchdog trigger")
-	}
-	// the window closes automatically after the grace period
-	time.Sleep(streamErrorGrace + 50*time.Millisecond)
-	if g.armed() {
-		t.Fatal("expected the guard window to close after the grace period")
-	}
-}

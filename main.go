@@ -50,7 +50,7 @@ type proxy struct {
 	probe    *probePolicy    // probe policy (nil when probe is disabled)
 	watchdog *watchdogPolicy // watchdog policy (nil when watchdog is disabled)
 	request  *requestPolicy  // request policy (nil when no request sub-feature is enabled)
-	guard    *streamGuard    // shared guard: injects an SSE error event into streams killed by a backend restart
+	debug    *debugPolicy    // debug policy (nil when debug is disabled)
 }
 
 // newBackendProxy creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -95,7 +95,7 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 			if w, ok := res.Request.Context().Value(clientWriterKey).(http.ResponseWriter); ok {
 				writer = w
 			}
-			res.Body = &guardBody{guard: p.guard, inner: cb, writer: writer, ctx: res.Request.Context()}
+			res.Body = &guardBody{inner: cb, writer: writer, ctx: res.Request.Context()}
 		} else {
 			res.Body = cb
 		}
@@ -114,18 +114,20 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
 	}
 
-	p.guard = newStreamGuard()
 	if cfg.Restart.Enabled() {
-		p.restart = newRestartPolicy(cfg.Restart, restartInterval(cfg), p.guard)
+		p.restart = newRestartPolicy(cfg.Restart, restartInterval(cfg))
 	}
 	if cfg.Probe.Enabled() {
-		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg), cfg.ApiKey, p.guard)
+		p.probe = newProbePolicy(ctx, cfg.Backend, cfg.Probe, probeInterval(cfg), cfg.ApiKey)
 	}
 	if cfg.Watchdog.Enabled() {
-		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend, cfg.ApiKey, p.guard)
+		p.watchdog = newWatchdogPolicy(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
 	}
-	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil {
-		log.Print("[config] restart, probe, watchdog and request all disabled, proxying only")
+	if cfg.Debug.Enabled() {
+		p.debug = newDebugPolicy(cfg.Debug)
+	}
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.debug == nil {
+		log.Print("[config] restart, probe, watchdog, request and debug all disabled, proxying only")
 	}
 	return p
 }
@@ -385,6 +387,16 @@ func main() {
 	} else {
 		log.Print("[config] request disabled")
 	}
+	if cfg.Debug.Enabled() {
+		d := cfg.Debug
+		if d.Path == "" {
+			d.Path = defaultDebugPath
+		}
+		log.Printf("[config] debug enabled: path=%s", d.Path)
+		log.Print("[config] debug command: " + d.Command)
+	} else {
+		log.Print("[config] debug disabled")
+	}
 
 	// startup command
 	if cfg.StartupCommand != "" {
@@ -405,6 +417,10 @@ func main() {
 		// request contexts inherit the root ctx
 		BaseContext: func(net.Listener) context.Context { return ctx },
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// the debug endpoint is served by the supervisor itself and never proxied
+			if sup.debug != nil && sup.debug.handle(w, r) {
+				return
+			}
 			sup.onHTTPRequest()
 			sup.ServeHTTP(w, r)
 		}),

@@ -53,6 +53,17 @@ func (g *WatchdogGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// DebugGroup debug config; Enable true means enabled
+type DebugGroup struct {
+	Enable  bool   `yaml:"enable"`  // whether enabled
+	Path    string `yaml:"path"`    // endpoint path, default "/debug/command"
+	Command string `yaml:"command"` // shell command run on request
+}
+
+func (g *DebugGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
 // RequestGroup request policy config; each sub-feature is independently switchable
 type RequestGroup struct {
 	// PrefixCache normalizes /v1/chat/completions request bodies so that semantically
@@ -75,6 +86,7 @@ type Config struct {
 	Probe          *ProbeGroup    `yaml:"probe"`
 	Watchdog       *WatchdogGroup `yaml:"watchdog"`
 	Request        *RequestGroup  `yaml:"request"`
+	Debug          *DebugGroup    `yaml:"debug"`
 }
 
 // restartInterval returns the restart group's idle threshold (configured in seconds)

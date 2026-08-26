@@ -55,6 +55,16 @@ watchdog:
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 
+# ===== debug config: enabled when enable is true =====
+# a manual trigger: requesting the endpoint runs the command synchronously and returns the result
+# (GET/POST /debug/command). No authentication - keep it reachable only from trusted networks
+debug:
+  enable: false
+  # endpoint path, default "/debug/command"
+  path: "/debug/command"
+  # command to run on request
+  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
+
 # ===== request policy config =====
 request:
   # prefix cache: normalize /v1/chat/completions request bodies (sort the tools list by tool

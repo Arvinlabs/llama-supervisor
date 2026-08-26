@@ -11,15 +11,11 @@ import (
 type restartPolicy struct {
 	tracker *idleTracker
 	command string
-	guard   *streamGuard // arms the restart window so in-flight streams get an SSE error event
 }
 
-func newRestartPolicy(g *RestartGroup, interval time.Duration, guard *streamGuard) *restartPolicy {
-	r := &restartPolicy{command: g.Command, guard: guard}
+func newRestartPolicy(g *RestartGroup, interval time.Duration) *restartPolicy {
+	r := &restartPolicy{command: g.Command}
 	r.tracker = newLazyIdleTracker(interval, func(ctx context.Context) bool {
-		// the idle timeout can be crossed by a long streaming request (no new request needed):
-		// arm the guard so the stream killed by the restart is flagged to the client
-		armRestart(r.guard)
 		return runCommand(ctx, "restart", r.command)
 	})
 	return r
