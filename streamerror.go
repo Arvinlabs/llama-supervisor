@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"net/http"
 	"sync"
 )
 
@@ -21,42 +20,53 @@ import (
 const streamErrorEvent = "\n\ndata: {\"error\":{\"message\":\"stream interrupted\",\"type\":\"server_error\",\"code\":\"stream_interrupted\"}}\n\n"
 
 // guardBody wraps the streaming backend response body. When the backend connection
-// ends abnormally mid-stream (Read error) and the client is still connected, it injects
-// the SSE error event into the client stream before it is closed. A normal stream end
-// (EOF, after the backend sent [DONE]) never triggers the injection
+// ends abnormally mid-stream (Read error) and the client is still connected, it serves
+// the SSE error event as the data of the following Reads, so the ReverseProxy copies
+// it into the client stream through its own (synchronized) write path, and only then
+// propagates the original error. A normal stream end (EOF, after the backend sent
+// [DONE]) never triggers the injection.
+//
+// The event must NOT be written straight to the client ResponseWriter from Read: that
+// writer is concurrently flushed by the proxy's maxLatencyWriter timer goroutine
+// (SSE streams flush immediately, so the flush timer is always armed), and a direct
+// write would race with it (detected by -race).
 type guardBody struct {
-	inner  io.ReadCloser
-	writer io.Writer
-	ctx    context.Context // the request context; a canceled ctx means the client already left
-	once   sync.Once
+	inner   io.ReadCloser
+	ctx     context.Context // the request context; a canceled ctx means the client already left
+	once    sync.Once
+	pending []byte // error event bytes not yet handed out to the reader
+	failed  error  // the first non-EOF read error; returned once pending is drained
 }
 
 func (b *guardBody) Read(p []byte) (int, error) {
+	if len(b.pending) > 0 {
+		n := copy(p, b.pending)
+		b.pending = b.pending[n:]
+		return n, nil
+	}
+	// the stream is already failed: the event was served, now end the stream with the
+	// remembered error (the inner read error must not be swallowed, so the failure is
+	// propagated deterministically even if the underlying body would recover)
+	if b.failed != nil {
+		return 0, b.failed
+	}
 	n, err := b.inner.Read(p)
 	if err != nil && !errors.Is(err, io.EOF) {
-		b.once.Do(b.maybeInject)
+		b.once.Do(func() {
+			b.failed = err
+			if b.ctx != nil && b.ctx.Err() != nil {
+				return // client disconnected: nothing to inject into
+			}
+			log.Print("[streamguard] stream interrupted, injecting error event")
+			b.pending = []byte(streamErrorEvent)
+		})
+		if len(b.pending) > 0 {
+			// park the error in failed for now: the event is served on the following
+			// reads, after which failed is returned and the proxy aborts the stream
+			return n, nil
+		}
 	}
 	return n, err
-}
-
-// maybeInject writes the error event to the client stream when the stream ends
-// abnormally and the client is still connected
-func (b *guardBody) maybeInject() {
-	if b.writer == nil {
-		return
-	}
-	if b.ctx != nil && b.ctx.Err() != nil {
-		return // client disconnected: nothing to inject into
-	}
-	if _, werr := io.WriteString(b.writer, streamErrorEvent); werr != nil {
-		log.Printf("[streamguard] inject error event failed: %v", werr)
-		return
-	}
-	// flush so the event reaches the client immediately, without waiting for the handler to return
-	if f, ok := b.writer.(http.Flusher); ok {
-		f.Flush()
-	}
-	log.Print("[streamguard] stream interrupted, error event sent to client")
 }
 
 // Close forwards to the inner body; the http client closes the backend TCP connection

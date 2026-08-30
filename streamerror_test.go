@@ -50,45 +50,11 @@ func (r *boomReader) Read(p []byte) (int, error) {
 
 func (r *boomReader) Close() error { return nil }
 
-// stream-killing read error: the SSE error event is injected after the data already sent
-func TestGuardBodyInjectsOnReadError(t *testing.T) {
+// drainGuard reads the body like the ReverseProxy copy loop does (small buffer on
+// purpose: the injected event must be served correctly in chunks) until the error
+// propagates, and returns everything handed out
+func drainGuard(b *guardBody) string {
 	var out strings.Builder
-	b := &guardBody{inner: &boomReader{}, writer: &out}
-	for {
-		_, err := b.Read(make([]byte, 64))
-		if err != nil {
-			break
-		}
-	}
-	if got := out.String(); !strings.HasSuffix(got, streamErrorEvent) {
-		t.Fatalf("expected stream to end with the error event, got %q", got)
-	}
-}
-
-// clean EOF (the backend finished normally and sent [DONE]): no injection
-func TestGuardBodyNoInjectOnCleanEOF(t *testing.T) {
-	var out strings.Builder
-	inner := &ioReadCloser{r: strings.NewReader("data: [DONE]\n\n")}
-	b := &guardBody{inner: inner, writer: &out}
-	for {
-		_, err := b.Read(make([]byte, 64))
-		if err != nil {
-			break
-		}
-	}
-	if strings.Contains(out.String(), streamErrorEvent) {
-		t.Fatalf("clean stream end must not be injected, got %q", out.String())
-	}
-}
-
-// a truncated final data line (the backend was killed mid-chunk, no trailing newline)
-// must not merge into the error event's data field: the leading blank line of the
-// injected event terminates it into its own (malformed) message event
-func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
-	var out strings.Builder
-	inner := &errReadCloser{remaining: []byte(`data: {"choices": partial`), err: errBoom}
-	b := &guardBody{inner: inner, writer: &out}
-	// emulate the ReverseProxy copy loop: forwarded bytes are written by the copy, not by Read
 	buf := make([]byte, 64)
 	for {
 		n, err := b.Read(buf)
@@ -99,7 +65,68 @@ func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
 			break
 		}
 	}
-	s := out.String()
+	return out.String()
+}
+
+// stream-killing read error: the SSE error event is injected after the data already sent
+func TestGuardBodyInjectsOnReadError(t *testing.T) {
+	b := &guardBody{inner: &boomReader{}}
+	got := drainGuard(b)
+	if !strings.HasSuffix(got, streamErrorEvent) {
+		t.Fatalf("expected stream to end with the error event, got %q", got)
+	}
+}
+
+// inner that returns an error once and then would keep working (a transient error):
+// the stream must still end with that error after the event, not silently continue
+type transientReader struct{ stage int }
+
+func (r *transientReader) Read(p []byte) (int, error) {
+	switch r.stage {
+	case 0:
+		r.stage = 1
+		return copy(p, []byte("data: a\n\n")), nil
+	case 1:
+		r.stage = 2
+		return 0, errBoom
+	case 2:
+		r.stage = 3
+		return copy(p, []byte("data: b\n\n")), nil
+	}
+	return 0, io.EOF
+}
+func (r *transientReader) Close() error { return nil }
+
+// a transient (non-repeating) read error must still abort the stream with that error
+// after the event: the error is remembered by the guard, not re-read from the body
+func TestGuardBodyPropagatesTransientError(t *testing.T) {
+	b := &guardBody{inner: &transientReader{}}
+	got := drainGuard(b)
+	if !strings.HasSuffix(got, streamErrorEvent) {
+		t.Fatalf("expected stream to end with the error event, got %q", got)
+	}
+	if strings.Contains(got, "data: b") {
+		t.Fatalf("stream must not continue past the error, got %q", got)
+	}
+}
+
+// clean EOF (the backend finished normally and sent [DONE]): no injection
+func TestGuardBodyNoInjectOnCleanEOF(t *testing.T) {
+	inner := &ioReadCloser{r: strings.NewReader("data: [DONE]\n\n")}
+	b := &guardBody{inner: inner}
+	got := drainGuard(b)
+	if strings.Contains(got, streamErrorEvent) {
+		t.Fatalf("clean stream end must not be injected, got %q", got)
+	}
+}
+
+// a truncated final data line (the backend was killed mid-chunk, no trailing newline)
+// must not merge into the error event's data field: the leading blank line of the
+// injected event terminates it into its own (malformed) message event
+func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
+	inner := &errReadCloser{remaining: []byte(`data: {"choices": partial`), err: errBoom}
+	b := &guardBody{inner: inner}
+	s := drainGuard(b)
 	// the truncated line is sealed into its own event
 	if !strings.Contains(s, `data: {"choices": partial`+"\n\n") {
 		t.Fatalf("truncated line should be sealed into its own event, got %q", s)
@@ -113,13 +140,13 @@ func TestGuardBodyInjectsAfterTruncatedLine(t *testing.T) {
 
 // the error event is written at most once even if the reader keeps erroring
 func TestGuardBodyInjectsOnce(t *testing.T) {
-	var out strings.Builder
-	inner := &boomReader{}
-	b := &guardBody{inner: inner, writer: &out}
+	b := &guardBody{inner: &boomReader{}}
+	s := drainGuard(b)
+	buf := make([]byte, 64)
 	for i := 0; i < 3; i++ {
-		_, _ = b.Read(make([]byte, 64)) // keep reading past the error
+		_, _ = b.Read(buf) // keep reading past the error
 	}
-	if n := strings.Count(out.String(), streamErrorEvent); n != 1 {
+	if n := strings.Count(s, streamErrorEvent); n != 1 {
 		t.Fatalf("expected exactly one error event, got %d", n)
 	}
 }
@@ -129,16 +156,9 @@ func TestGuardBodyNoInjectWhenClientGone(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // simulate client already gone
 
-	var out strings.Builder
-	b := &guardBody{inner: &boomReader{}, writer: &out, ctx: ctx}
-	for {
-		_, err := b.Read(make([]byte, 64))
-		if err != nil {
-			break
-		}
-	}
-	if out.Len() != 0 {
-		t.Fatalf("expected no injection when client is gone, got %q", out.String())
+	b := &guardBody{inner: &boomReader{}, ctx: ctx}
+	if got := drainGuard(b); strings.Contains(got, streamErrorEvent) {
+		t.Fatalf("expected no injection when the client is gone, got %q", got)
 	}
 }
 
@@ -218,5 +238,3 @@ func TestShouldInjectStreamError(t *testing.T) {
 		t.Fatal("other endpoints must not be eligible")
 	}
 }
-
-

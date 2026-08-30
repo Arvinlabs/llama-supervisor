@@ -88,14 +88,9 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	rp.ModifyResponse = func(res *http.Response) error {
 		cb := &ctxBody{ctx: res.Request.Context(), rc: res.Body, quit: make(chan struct{})}
 		// only SSE chat completion streams can receive the injected error event; any other
-		// response (non-stream JSON, /completion, /slots, ...) keeps the plain body.
-		// the client ResponseWriter was attached to the request context in ServeHTTP
+		// response (non-stream JSON, /completion, /slots, ...) keeps the plain body
 		if res.Body != nil && shouldInjectStreamError(res) {
-			var writer io.Writer
-			if w, ok := res.Request.Context().Value(clientWriterKey).(http.ResponseWriter); ok {
-				writer = w
-			}
-			res.Body = &guardBody{inner: cb, writer: writer, ctx: res.Request.Context()}
+			res.Body = &guardBody{inner: cb, ctx: res.Request.Context()}
 		} else {
 			res.Body = cb
 		}
@@ -220,9 +215,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the backend read is interrupted, and "client disconnected" is logged from ctxBody/ErrorHandler.
 	// Note: r.Context().Err() must not be used here to detect this, because net/http also cancels
 	// the ctx after the handler returns normally, which would be a false positive.
-	// Attach rec to the request context so the proxy hooks can reach the client ResponseWriter
-	// (ReverseProxy does not expose it through the response)
-	p.proxy.ServeHTTP(rec, r.WithContext(context.WithValue(ctx, clientWriterKey, rec)))
+	p.proxy.ServeHTTP(rec, r)
 	logAccess(rec.status, r, start)
 }
 
@@ -259,12 +252,6 @@ func (p *proxy) startBackground(ctx context.Context) {
 		}()
 	}
 }
-
-// clientWriterKey is the context key under which the ResponseWriter serving the request is
-// exposed to the proxy hooks (the guard uses it to inject the SSE error event into the stream)
-type clientWriterKeyT int
-
-const clientWriterKey clientWriterKeyT = 0
 
 // streamErrorPath is the only proxied path eligible for the injected SSE error event:
 // the OpenAI-compatible chat completion endpoint
