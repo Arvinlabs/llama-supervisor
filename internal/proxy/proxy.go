@@ -29,7 +29,7 @@ type Supervisor struct {
 	probe    *probe.Policy    // probe policy (nil when probe is disabled)
 	watchdog *watchdog.Policy // watchdog policy (nil when watchdog is disabled)
 	request  *request.Policy  // request policy (nil when no request sub-feature is enabled)
-	debug    *debug.Policy    // debug policy (nil when debug is disabled)
+	debug    *debug.Policy    // debug policy (nil when debug is disabled); Tap dumps proxied requests when savePath is set
 }
 
 // New creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -196,6 +196,9 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.request != nil && !p.request.Authorize(w, r) {
 		logAccess(http.StatusUnauthorized, r, start)
 		return
+	}
+	if p.debug != nil {
+		p.debug.Tap(r) // no-op when debug.savePath is not set
 	}
 	rec := &statusRecorder{ResponseWriter: w}
 	// probe idle timeout: probe first; if the command actually ran (backend restarted), wait for the backend to be ready.

@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -144,4 +148,97 @@ func TestProxyForwardsNormalizedBody(t *testing.T) {
 	if ia < 0 || iz < 0 || ia > iz {
 		t.Fatalf("backend received unsorted tools: %s", backendBody)
 	}
+}
+
+// with debug enabled and savePath set, a proxied business request is dumped to a plain
+// text file named by the request time (full request line, all headers, body), and the
+// proxy still forwards the original body untouched
+func TestProxySavesProxiedRequest(t *testing.T) {
+	dir := t.TempDir()
+	var backendBody []byte
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendBody, _ = io.ReadAll(r.Body)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := config.Config{
+		Backend: backend.URL,
+		Debug:   &config.DebugGroup{Enable: true, SavePath: dir},
+	}
+	sup := New(cfg, context.Background())
+
+	body := `{"model":"llama","messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer sk-virtual-key-1")
+	w := httptest.NewRecorder()
+	sup.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	// the proxy must forward the complete original body (the tee must not consume it)
+	if string(backendBody) != body {
+		t.Fatalf("backend body = %q, want %q", backendBody, body)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 saved request file, got %d", len(entries))
+	}
+	name := entries[0].Name()
+	if !strings.HasSuffix(name, ".txt") {
+		t.Fatalf("file name %q has no .txt suffix", name)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if !strings.HasPrefix(s, "POST /v1/chat/completions HTTP/1.1\r\n") {
+		t.Fatalf("request line missing or wrong: %q", s[:min(len(s), 50)])
+	}
+	for _, want := range []string{
+		"Content-Type: application/json",
+		"Authorization: Bearer sk-virtual-key-1",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("dump missing %q:\n%s", want, s)
+		}
+	}
+	// the JSON body must be the last part of the dump, pretty-printed
+	var expected bytes.Buffer
+	if err := json.Indent(&expected, []byte(body), "", "  "); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(s, expected.String()) {
+		t.Fatalf("dump must end with the pretty-printed body:\n%s", s)
+	}
+}
+
+// debug disabled: no debug policy at all; debug enabled without savePath: Tap is a no-op
+func TestProxyNoSaveWithoutConfig(t *testing.T) {
+	t.Run("debug disabled", func(t *testing.T) {
+		sup := New(config.Config{Backend: "http://127.0.0.1:1", Debug: &config.DebugGroup{Enable: false}}, context.Background())
+		if sup.debug != nil {
+			t.Fatal("expected no debug policy")
+		}
+	})
+	t.Run("debug enabled, savePath empty", func(t *testing.T) {
+		sup := New(config.Config{Backend: "http://127.0.0.1:1", Debug: &config.DebugGroup{Enable: true}}, context.Background())
+		if sup.debug == nil {
+			t.Fatal("expected the debug policy")
+		}
+		// Tap must be a no-op: the body is left untouched
+		r := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("hello"))
+		before := r.Body
+		sup.debug.Tap(r)
+		if r.Body != before {
+			t.Fatal("body was replaced, want the original body untouched")
+		}
+	})
 }

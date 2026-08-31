@@ -95,6 +95,15 @@ When `request.enable` is true and `request.virtualKeys` is non-empty, all proxie
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |
 
+### debug
+
+| Field | Description |
+|---|---|
+| `debug.enable` | whether enabled, default `false` |
+| `debug.path` | endpoint path, default `/debug/command`; GET/POST runs the command synchronously and returns the result |
+| `debug.command` | shell command run on request |
+| `debug.savePath` | when debug is enabled, every proxied request is dumped to this directory as a plain text file named by the request time (`YYYYMMDD_HHMMSS.mmm.txt`, full request line + headers + body, generated from exactly what the client sent; JSON bodies are stored pretty-printed, non-JSON bodies base64-encoded so the dump stays plain text); default empty (saving disabled) |
+
 ### request
 
 | Field | Description |

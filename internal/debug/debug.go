@@ -17,14 +17,19 @@ const DefaultDebugPath = "/debug/command"
 // inspecting the backend by hand. The command runs under the request context, so the
 // client canceling the request aborts it.
 // Note: like the other policies the command is plain shell and the endpoint is
-// unauthenticated - keep it reachable only from trusted networks
+// unauthenticated - keep it reachable only from trusted networks.
+//
+// It also carries the request dump feature (Tap): when SavePath is set, every request
+// the caller passes through Tap is saved to a plain text file named by the request
+// time, for later inspection and replay.
 type Policy struct {
-	path    string
-	command string
+	path     string
+	command  string
+	savePath string
 }
 
 func New(g *config.DebugGroup) *Policy {
-	p := &Policy{command: g.Command}
+	p := &Policy{command: g.Command, savePath: g.SavePath}
 	if g.Path != "" {
 		p.path = g.Path
 	} else {

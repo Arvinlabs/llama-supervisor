@@ -55,9 +55,10 @@ func (g *WatchdogGroup) Enabled() bool {
 
 // DebugGroup debug config; Enable true means enabled
 type DebugGroup struct {
-	Enable  bool   `yaml:"enable"`  // whether enabled
-	Path    string `yaml:"path"`    // endpoint path, default "/debug/command"
-	Command string `yaml:"command"` // shell command run on request
+	Enable   bool   `yaml:"enable"`   // whether enabled
+	Path     string `yaml:"path"`     // endpoint path, default "/debug/command"
+	Command  string `yaml:"command"`  // shell command run on request
+	SavePath string `yaml:"savePath"` // when debug is enabled, directory the proxied requests are dumped to as plain text files named by the request time; empty disables saving
 }
 
 func (g *DebugGroup) Enabled() bool {

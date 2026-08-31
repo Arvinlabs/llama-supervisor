@@ -101,6 +101,9 @@ func main() {
 		}
 		log.Printf("[config] debug enabled: path=%s", d.Path)
 		log.Print("[config] debug command: " + d.Command)
+		if d.SavePath != "" {
+			log.Print("[config] debug: saving proxied requests to " + d.SavePath)
+		}
 	} else {
 		log.Print("[config] debug disabled")
 	}
