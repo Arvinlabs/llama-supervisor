@@ -13,27 +13,37 @@ import (
 	"time"
 )
 
-// Tap dumps the incoming request to a plain text file named by the request time
-// (YYYYMMDD_HHMMSS.mmm.txt) under the configured savePath, for later inspection and
-// replay. It is a no-op when SavePath is not set.
-//
-// The dump is written as the request is served: the request line and all headers are
-// emitted immediately, then the body is buffered and written to the file when the body
-// is closed (the proxy closes it after forwarding). If the body is valid JSON it is
-// stored pretty-printed (2-space indent) for readability, otherwise base64-encoded so
-// the dump stays a plain text file. The file is generated from exactly what the client
-// sent, untouched by the request policy. Failures are logged but never affect the
-// caller.
+// Tap dumps the inbound request to a plain text file named by the request time
+// (YYYYMMDD_HHMMSS.mmm.txt) under the configured SavePath, for later inspection and
+// replay. It is a no-op when SavePath is not set. The inbound dump is generated from
+// exactly what the client sent, untouched by the request policy.
 func (p *Policy) Tap(r *http.Request) {
-	if p.savePath == "" {
+	p.saveRequest(r, p.savePath)
+}
+
+// TapOutbound dumps the outbound request (after the request policy has rewritten it, when
+// enabled) to a plain text file named by the request time under the configured OutSavePath.
+// It is a no-op when OutSavePath is not set.
+func (p *Policy) TapOutbound(r *http.Request) {
+	p.saveRequest(r, p.outSavePath)
+}
+
+// saveRequest implements Tap and TapOutbound: the dump is written as the request is served:
+// the request line and all headers are emitted immediately, then the body is buffered and
+// written to the file when the body is closed (the proxy closes it after forwarding). If the
+// body is valid JSON it is stored pretty-printed (2-space indent) for readability, otherwise
+// base64-encoded so the dump stays a plain text file. Failures are logged but never affect
+// the caller.
+func (p *Policy) saveRequest(r *http.Request, dir string) {
+	if dir == "" {
 		return
 	}
 	name := time.Now().Format("20060102_150405.000") + ".txt"
-	if err := os.MkdirAll(p.savePath, 0o755); err != nil {
-		log.Printf("[debug] save request: mkdir %s: %v", p.savePath, err)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[debug] save request: mkdir %s: %v", dir, err)
 		return
 	}
-	f, err := os.Create(filepath.Join(p.savePath, name))
+	f, err := os.Create(filepath.Join(dir, name))
 	if err != nil {
 		log.Printf("[debug] save request: create %s: %v", name, err)
 		return
@@ -48,6 +58,10 @@ func (p *Policy) Tap(r *http.Request) {
 	}
 	if r.Host != "" {
 		_, _ = fmt.Fprintf(f, "Host: %s\r\n", r.Host)
+	} else if r.URL != nil && r.URL.Host != "" {
+		// outbound requests (debug.outSavePath) carry the backend address in URL.Host
+		// while Request.Host is empty
+		_, _ = fmt.Fprintf(f, "Host: %s\r\n", r.URL.Host)
 	}
 	if err := r.Header.Write(f); err != nil {
 		log.Printf("[debug] save request: write headers of %s: %v", name, err)
@@ -61,7 +75,7 @@ func (p *Policy) Tap(r *http.Request) {
 	}
 	// one log line per saved request, at the moment the dump is complete: here for
 	// body-less requests, in the tee's Close for requests with a body
-	path := filepath.Join(p.savePath, name)
+	path := filepath.Join(dir, name)
 	if r.Body == nil {
 		_ = f.Close()
 		log.Printf("[debug] saved request to %s", path)

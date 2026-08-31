@@ -205,6 +205,64 @@ func TestPolicyTapSavesNonJSONBodyAsBase64(t *testing.T) {
 	}
 }
 
+// TapOutbound dumps using OutSavePath and, when Request.Host is empty, the dump falls back to
+// URL.Host (outbound requests carry the backend address there)
+func TestTapOutboundSavesWithURLHost(t *testing.T) {
+	dir := t.TempDir()
+	p := New(&config.DebugGroup{Enable: true, OutSavePath: dir})
+
+	body := `{"model":"m"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	r.Host = "" // outbound requests carry the backend address in URL.Host, not Request.Host
+	r.URL.Host = "backend.example.com:8080"
+	r.Header.Set("Content-Type", "application/json")
+	p.TapOutbound(r)
+
+	if _, err := io.ReadAll(r.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 saved file, got %d", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, want := range []string{
+		"POST /v1/chat/completions HTTP/1.1",
+		"Host: backend.example.com:8080",
+		"Content-Type: application/json",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("dump missing %q:\n%s", want, s)
+		}
+	}
+}
+
+// Tap and TapOutbound are no-ops when their configured directory is empty
+func TestTapNoOpWithoutPath(t *testing.T) {
+	p := New(&config.DebugGroup{Enable: true})
+	r := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("hello"))
+	before := r.Body
+	p.Tap(r)
+	if r.Body != before {
+		t.Fatal("Tap must leave the body untouched when SavePath is empty")
+	}
+	p.TapOutbound(r)
+	if r.Body != before {
+		t.Fatal("TapOutbound must leave the body untouched when OutSavePath is empty")
+	}
+}
+
 // closing the body twice (the proxy may do this) must not fail or double-write the dump
 func TestPolicyTapDoubleClose(t *testing.T) {
 	dir := t.TempDir()

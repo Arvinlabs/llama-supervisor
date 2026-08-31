@@ -58,7 +58,11 @@ type DebugGroup struct {
 	Enable   bool   `yaml:"enable"`   // whether enabled
 	Path     string `yaml:"path"`     // endpoint path, default "/debug/command"
 	Command  string `yaml:"command"`  // shell command run on request
-	SavePath string `yaml:"savePath"` // when debug is enabled, directory the proxied requests are dumped to as plain text files named by the request time; empty disables saving
+	SavePath string `yaml:"savePath"` // when debug is enabled, directory the inbound proxied requests are dumped to as plain text files named by the request time; empty disables saving
+	// OutSavePath when debug is enabled, directory the outbound proxied requests (after the request
+	// policy has rewritten it, when enabled) are dumped to as plain text files named by the request
+	// time; empty disables saving
+	OutSavePath string `yaml:"outSavePath"`
 }
 
 func (g *DebugGroup) Enabled() bool {

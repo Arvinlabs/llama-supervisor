@@ -241,4 +241,176 @@ func TestProxyNoSaveWithoutConfig(t *testing.T) {
 			t.Fatal("body was replaced, want the original body untouched")
 		}
 	})
+	t.Run("debug disabled, outSavePath ignored", func(t *testing.T) {
+		sup := New(config.Config{Backend: "http://127.0.0.1:1", Debug: &config.DebugGroup{Enable: false, OutSavePath: t.TempDir()}}, context.Background())
+		if sup.debug != nil {
+			t.Fatal("expected no debug policy")
+		}
+		if sup.proxy.Transport != nil {
+			t.Fatal("expected no outbound save transport when debug.enable is false")
+		}
+	})
+	t.Run("debug enabled, outSavePath empty", func(t *testing.T) {
+		sup := New(config.Config{Backend: "http://127.0.0.1:1", Debug: &config.DebugGroup{Enable: true}}, context.Background())
+		if sup.debug == nil {
+			t.Fatal("expected the debug policy")
+		}
+		if sup.proxy.Transport != nil {
+			t.Fatal("expected no outbound save transport when debug.outSavePath is empty")
+		}
+	})
+}
+
+// with debug.outSavePath set, the dumped request is the outbound request after the request
+// policy has rewritten it: the virtual key is replaced by the backend key and the tools list
+// is normalized, while the proxy still forwards the rewritten body
+func TestProxySavesOutboundRequestAfterPolicyRewrite(t *testing.T) {
+	dir := t.TempDir()
+	var backendBody []byte
+	var backendAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendBody, _ = io.ReadAll(r.Body)
+		backendAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := config.Config{
+		Backend: backend.URL,
+		ApiKey:  "sk-backend",
+		Debug:   &config.DebugGroup{Enable: true, OutSavePath: dir},
+		Request: &config.RequestGroup{
+			Enable:      true,
+			VirtualKeys: []string{"sk-virtual"},
+			PrefixCache: true,
+		},
+	}
+	sup := New(cfg, context.Background())
+	if sup.debug == nil || sup.proxy.Transport == nil {
+		t.Fatal("expected the debug policy and the outbound save transport")
+	}
+
+	body := `{"model":"m","tools":[` +
+		`{"type":"function","function":{"name":"z","description":"z","parameters":{"type":"object","properties":{"b":1.0,"a":2}}}},` +
+		`{"type":"function","function":{"name":"a","description":"a","parameters":{"type":"object","properties":{"c":{}}}}}` +
+		`],"messages":[{"role":"user","content":"hi"}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer sk-virtual")
+	w := httptest.NewRecorder()
+	sup.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if backendAuth != "Bearer sk-backend" {
+		t.Fatalf("backend Authorization = %q, want the re-signed backend key", backendAuth)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 saved outbound request file, got %d", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	// the dump must be the outbound request: backend host, re-signed key, virtual key never present
+	if !strings.HasPrefix(s, "POST /v1/chat/completions HTTP/1.1\r\n") {
+		t.Fatalf("request line missing or wrong: %q", s[:min(len(s), 60)])
+	}
+	for _, want := range []string{
+		"Host: " + backend.Listener.Addr().String(),
+		"Authorization: Bearer sk-backend",
+		"Content-Type: application/json",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("outbound dump missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "sk-virtual") {
+		t.Fatalf("outbound dump must not contain the virtual key:\n%s", s)
+	}
+	// the dumped JSON body must be the normalized outbound body (tools sorted a before z)
+	idx := strings.Index(s, "\r\n\r\n{")
+	if idx < 0 {
+		t.Fatalf("dump has no JSON body:\n%s", s)
+	}
+	bodyStart := idx + len("\r\n\r\n")
+	var parsed struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(s[bodyStart:]), &parsed); err != nil {
+		t.Fatalf("dump body is not valid JSON: %v", err)
+	}
+	if len(parsed.Tools) != 2 || parsed.Tools[0].Function.Name != "a" || parsed.Tools[1].Function.Name != "z" {
+		t.Fatalf("outbound dump tools not normalized:\n%s", s)
+	}
+	// the proxy must forward the same normalized body to the backend (compact form, not the dump's pretty-print)
+	var forwarded struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(backendBody, &forwarded); err != nil {
+		t.Fatalf("backend body is not valid JSON: %v", err)
+	}
+	if len(forwarded.Tools) != 2 || forwarded.Tools[0].Function.Name != "a" || forwarded.Tools[1].Function.Name != "z" {
+		t.Fatalf("backend body tools not normalized:\n%s", backendBody)
+	}
+}
+
+// debug.outSavePath is independent of the request policy: with request disabled the outbound
+// request is still dumped (there is simply nothing to rewrite)
+func TestProxySavesOutboundRequestWithoutRequestPolicy(t *testing.T) {
+	dir := t.TempDir()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	sup := New(config.Config{Backend: backend.URL, Debug: &config.DebugGroup{Enable: true, OutSavePath: dir}}, context.Background())
+	if sup.debug == nil || sup.proxy.Transport == nil {
+		t.Fatal("expected the debug policy and the outbound save transport")
+	}
+
+	body := `{"model":"m"}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	sup.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 saved outbound request file, got %d", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, want := range []string{
+		"POST /v1/chat/completions HTTP/1.1",
+		"Content-Type: application/json",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("outbound dump missing %q:\n%s", want, s)
+		}
+	}
 }

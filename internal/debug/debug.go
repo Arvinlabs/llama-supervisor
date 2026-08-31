@@ -19,17 +19,19 @@ const DefaultDebugPath = "/debug/command"
 // Note: like the other policies the command is plain shell and the endpoint is
 // unauthenticated - keep it reachable only from trusted networks.
 //
-// It also carries the request dump feature (Tap): when SavePath is set, every request
-// the caller passes through Tap is saved to a plain text file named by the request
-// time, for later inspection and replay.
+// It also carries the request dump feature: when SavePath is set, every request passed to Tap is
+// saved to a plain text file named by the request time (inbound requests, debug.savePath); when
+// OutSavePath is set, every request passed to TapOutbound is saved the same way (outbound
+// requests, debug.outSavePath). Both are for later inspection and replay.
 type Policy struct {
-	path     string
-	command  string
-	savePath string
+	path        string
+	command     string
+	savePath    string
+	outSavePath string
 }
 
 func New(g *config.DebugGroup) *Policy {
-	p := &Policy{command: g.Command, savePath: g.SavePath}
+	p := &Policy{command: g.Command, savePath: g.SavePath, outSavePath: g.OutSavePath}
 	if g.Path != "" {
 		p.path = g.Path
 	} else {

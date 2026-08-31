@@ -29,7 +29,7 @@ type Supervisor struct {
 	probe    *probe.Policy    // probe policy (nil when probe is disabled)
 	watchdog *watchdog.Policy // watchdog policy (nil when watchdog is disabled)
 	request  *request.Policy  // request policy (nil when no request sub-feature is enabled)
-	debug    *debug.Policy    // debug policy (nil when debug is disabled); Tap dumps proxied requests when savePath is set
+	debug    *debug.Policy    // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
 }
 
 // New creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -58,6 +58,14 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		}
 	} else {
 		rp = httputil.NewSingleHostReverseProxy(backend)
+	}
+	if cfg.Debug.Enabled() {
+		p.debug = debug.New(cfg.Debug)
+	}
+	// outbound request dump: the transport taps the request as it is about to be sent, i.e. after
+	// the request policy has rewritten it (when the request policy is enabled)
+	if p.debug != nil && cfg.Debug.OutSavePath != "" {
+		rp.Transport = &outboundTapTransport{inner: http.DefaultTransport, policy: p.debug}
 	}
 	// FlushInterval=0: flush after every Write so SSE/streaming output reaches the client unbuffered
 	rp.FlushInterval = 0
@@ -97,9 +105,6 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	if cfg.Watchdog.Enabled() {
 		p.watchdog = watchdog.New(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
 	}
-	if cfg.Debug.Enabled() {
-		p.debug = debug.New(cfg.Debug)
-	}
 	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.debug == nil {
 		log.Print("[config] restart, probe, watchdog, request and debug all disabled, proxying only")
 	}
@@ -138,6 +143,21 @@ func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// outboundTapTransport wraps the default transport and dumps every outbound request (after the
+// request policy has rewritten it, when the request policy is enabled) before it is sent to the
+// backend
+type outboundTapTransport struct {
+	inner  http.RoundTripper
+	policy *debug.Policy
+}
+
+func (t *outboundTapTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if t.policy != nil {
+		t.policy.TapOutbound(r)
+	}
+	return t.inner.RoundTrip(r)
 }
 
 // ctxBody wraps the backend response body: when ctx (the client request context) is canceled

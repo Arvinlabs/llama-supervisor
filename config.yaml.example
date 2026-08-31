@@ -64,11 +64,15 @@ debug:
   path: "/debug/command"
   # command to run on request
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
-  # when debug is enabled: directory to dump every proxied request to as a plain text
+  # when debug is enabled: directory to dump every inbound proxied request to as a plain text
   # file named by the request time (YYYYMMDD_HHMMSS.mmm.txt, full request line + headers
   # + body; JSON bodies are stored pretty-printed, non-JSON bodies base64-encoded so
   # the dump stays plain text); empty disables saving
   savePath: ""
+  # when debug is enabled: directory to dump every outbound proxied request to (after the request
+  # policy has rewritten it, when request.enable is true) using the same plain text format as
+  # savePath; empty disables saving
+  outSavePath: ""
 
 # ===== request policy config: enabled when enable is true =====
 request:
