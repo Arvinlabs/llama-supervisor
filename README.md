@@ -1,10 +1,11 @@
 # llama-supervisor
 
-Go reverse proxy with idle health probing, automatic restart, a speed watchdog, and a request policy. The idle timer keeps resetting while requests are active. `restart`, `probe`, and `watchdog` are three independent features, each toggled by its own `enable` switch; the `request` policy holds sub-features (like prefix cache), each toggled by its own switch (all can be disabled, in which case the process only reverse-proxies):
+Go reverse proxy with idle health probing, automatic restart, a speed watchdog, and a request policy. The idle timer keeps resetting while requests are active. `restart`, `probe`, `watchdog`, and `debug` are independent features, each toggled by its own `enable` switch; the `request` policy is toggled by `request.enable: true` and holds sub-features (virtual keys, prefix cache), each switched on its own within the group (all disabled means the process only reverse-proxies):
 
 - `probe.enable: true`: after being idle for `probe.interval` seconds, the next request triggers a probe of the backend llama server before proxying. If the tail characters keep repeating during streaming, the backend is considered unhealthy, `probe.command` runs, and then the request is proxied.
 - `restart.enable: true`: an independent background check. Timing starts after the first request; as long as requests keep coming the window extends. Once idle for `restart.interval` seconds, `restart.command` runs directly without waiting for a request. After a trigger, timing is paused: no requests means no timing, and a new request restarts the timer.
 - `watchdog.enable: true`: an independent background sampler that polls the backend `/slots` every `watchdog.interval` seconds. If the generation speed stays above `watchdog.maxRate` t/s for `watchdog.times` consecutive samples, the backend is assumed to be stuck in an output loop and `watchdog.command` runs.
+- `request.enable: true` + `request.virtualKeys: [ ... ]`: virtual API keys. When the group is enabled and the list is non-empty, clients must present one of the keys in the OpenAI format (`Authorization: Bearer <key>`, the raw header value and the llama.cpp-style `api_key` query parameter are accepted too); missing or unknown keys are rejected with an OpenAI-format 401 error and never proxied. Accepted requests are re-signed with the global `apiKey`, so the virtual keys never reach the backend.
 - `request.prefixCache: true`: normalize `/v1/chat/completions` request bodies before proxying to maximize the backend prefix cache hit rate — the tools list is sorted by tool name (`function.name` / `custom.name` per the OpenAI spec) and all JSON object keys (including tool parameter schemas) are re-emitted in sorted order, so semantically identical requests produce identical bytes.
 
 ## Features
@@ -49,12 +50,16 @@ cp config.yaml.example config.yaml
 |---|---|
 | `host` / `port` | listen address |
 | `backend` | backend address, e.g. `http://127.0.0.1:8081` |
-| `apiKey` | global backend API key, sent as `Bearer <key>` on probe and `/slots` sampling requests (not used by normal proxying), default empty |
+| `apiKey` | global backend API key, sent as `Bearer <key>` on probe and `/slots` sampling requests; when `request.virtualKeys` is enabled it also re-signs accepted proxied requests, default empty |
 | `startupCommand` | shell command run synchronously at startup |
 | `probe` | probe config object, enabled with `enable: true`, see below |
 | `restart` | restart config object, enabled with `enable: true`, see below |
 | `watchdog` | watchdog config object, enabled with `enable: true`, see below |
 | `request` | request policy config object, see below |
+
+### request (virtual keys)
+
+When `request.enable` is true and `request.virtualKeys` is non-empty, all proxied requests must carry one of the configured virtual keys (OpenAI format `Authorization: Bearer <key>`); the supervisor re-signs the outbound request with the global `apiKey` (no `Authorization` header is sent if `apiKey` is empty), and rejects other requests with an OpenAI-format 401 error.
 
 ### probe
 
@@ -94,4 +99,6 @@ cp config.yaml.example config.yaml
 
 | Field | Description |
 |---|---|
+| `request.enable` | whether the request policy is enabled, default `false`; sub-features only take effect when it is true |
+| `request.virtualKeys` | virtual API key list, default empty (sub-feature off). When non-empty, proxied requests must carry one of the keys in the OpenAI format (`Authorization: Bearer <key>`; the raw header value and the `api_key` query parameter are also accepted); missing or unknown keys are rejected with an OpenAI-format 401 error. Accepted requests are re-signed with the global `apiKey`, which never sees the virtual keys |
 | `request.prefixCache` | prefix cache, default `false`. When enabled, `/v1/chat/completions` request bodies are normalized before proxying: only the top-level `tools` list is touched — sorted by tool name (`function.name` / `custom.name` per the OpenAI spec, canonical-byte tiebreak), and every element is re-encoded in canonical form (object keys sorted at all levels, numbers in shortest form `1.0` -> `1`, no HTML escaping), so semantically identical tools lists in any key order / number literal / whitespace yield one canonical array; every byte outside the tools array is passed through exactly as the client sent it. A tools array with invalid UTF-8 is passed through unchanged |

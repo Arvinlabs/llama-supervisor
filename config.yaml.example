@@ -65,8 +65,16 @@ debug:
   # command to run on request
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 
-# ===== request policy config =====
+# ===== request policy config: enabled when enable is true =====
 request:
+  enable: true
+  # virtual keys: list of virtual API keys; when non-empty the supervisor requires clients to
+  # present one of them in the OpenAI format (Authorization: Bearer <key>) and re-signs the
+  # outbound request with the global apiKey (the virtual keys never reach the backend).
+  # Missing or unknown keys are rejected with an OpenAI-format 401 error. Empty list disables it
+  virtualKeys:
+    - "sk-virtual-key-1"
+    - "sk-virtual-key-2"
   # prefix cache: normalize /v1/chat/completions request bodies (sort the tools list by tool
   # name, sort all JSON object keys recursively) so semantically identical requests share one
   # canonical byte form and the backend prefix cache hits

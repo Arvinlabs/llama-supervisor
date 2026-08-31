@@ -64,16 +64,23 @@ func (g *DebugGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
-// RequestGroup request policy config; each sub-feature is independently switchable
+// RequestGroup request policy config; Enable true means enabled, each sub-feature
+// is independently switchable within the group
 type RequestGroup struct {
+	Enable bool `yaml:"enable"` // whether enabled
 	// PrefixCache normalizes /v1/chat/completions request bodies so that semantically
 	// identical requests produce identical bytes, maximizing the backend prefix cache hit rate
 	PrefixCache bool `yaml:"prefixCache"`
+	// VirtualKeys is the list of virtual API keys; when non-empty the supervisor
+	// requires clients to present one of them (OpenAI format, "Authorization: Bearer <key>")
+	// and re-signs the outbound request with the global apiKey. The virtual keys never
+	// reach the backend
+	VirtualKeys []string `yaml:"virtualKeys"`
 }
 
-// Enabled reports whether any request policy sub-feature is enabled
+// Enabled reports whether the request policy is enabled (independent of the sub-features)
 func (g *RequestGroup) Enabled() bool {
-	return g != nil && g.PrefixCache
+	return g != nil && g.Enable
 }
 
 type Config struct {

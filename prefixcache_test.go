@@ -309,7 +309,7 @@ func TestProxyForwardsNormalizedBody(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	sup := newBackendProxy(Config{Backend: backend.URL, Request: &RequestGroup{PrefixCache: true}}, context.Background())
+	sup := newBackendProxy(Config{Backend: backend.URL, Request: &RequestGroup{Enable: true, PrefixCache: true}}, context.Background())
 	body := `{"model":"m","temperature":0.700,"tools":[{"type":"function","function":{"name":"z","parameters":{"type":"object","properties":{"b":1.0,"a":2}}},"description":"z"},
 	{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"c":{}}},"description":"a"}}],"messages":[{"role":"user","content":"hi"}]}`
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))

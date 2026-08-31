@@ -15,7 +15,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// prefixCachePolicy is a request policy modifier that normalizes /v1/chat/completions
+// prefixCachePolicy is a request plugin that normalizes /v1/chat/completions
 // request bodies before proxying so that semantically identical requests produce
 // identical bytes, maximizing the backend prompt/prefix cache hit rate.
 //
@@ -33,6 +33,9 @@ import (
 type prefixCachePolicy struct{}
 
 func newPrefixCachePolicy() *prefixCachePolicy { return &prefixCachePolicy{} }
+
+// compile-time proof that prefixCachePolicy is a request plugin
+var _ requestPlugin = (*prefixCachePolicy)(nil)
 
 const completionsPath = "/v1/chat/completions"
 

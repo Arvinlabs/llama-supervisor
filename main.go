@@ -70,7 +70,7 @@ func newBackendProxy(cfg Config, ctx context.Context) *proxy {
 	if cfg.Request.Enabled() {
 		// with a request policy use the Rewrite API (Director has no request hook):
 		// SetURL routes to the backend, then the policy modifiers run on the outbound request
-		p.request = newRequestPolicy(cfg.Request)
+		p.request = newRequestPolicy(cfg.Request, cfg.ApiKey)
 		rp = &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(backend)
@@ -205,6 +205,12 @@ func (b *ctxBody) watch() {
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
+	// inbound auth: the policy rejects missing/unknown keys (writing the 401 response
+	// itself) before the request is proxied
+	if p.request != nil && !p.request.authorize(w, r) {
+		logAccess(http.StatusUnauthorized, r, start)
+		return
+	}
 	rec := &statusRecorder{ResponseWriter: w}
 	// probe idle timeout: probe first; if the command actually ran (backend restarted), wait for the backend to be ready.
 	// restart timing needs no manual reset: this request's onHTTPRequest already refreshed it
@@ -367,6 +373,9 @@ func main() {
 	}
 	if cfg.Request.Enabled() {
 		var feats []string
+		if len(cfg.Request.VirtualKeys) > 0 {
+			feats = append(feats, "virtualKeys("+strconv.Itoa(len(cfg.Request.VirtualKeys))+")")
+		}
 		if cfg.Request.PrefixCache {
 			feats = append(feats, "prefixCache")
 		}
