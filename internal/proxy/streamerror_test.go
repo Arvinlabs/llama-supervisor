@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Arvinlabs/llama-supervisor/internal/config"
 )
 
 // errBoom simulates the "unexpected EOF" the proxy hits when the backend connection is killed mid-stream
@@ -182,7 +184,7 @@ func TestProxyInjectsErrorEventWhenStreamKilled(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	sup := newBackendProxy(Config{Backend: backend.URL}, t.Context())
+	sup := New(config.Config{Backend: backend.URL}, t.Context())
 	srv := httptest.NewServer(sup)
 	defer srv.Close()
 

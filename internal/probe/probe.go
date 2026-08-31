@@ -1,4 +1,4 @@
-package main
+package probe
 
 import (
 	"bufio"
@@ -11,95 +11,99 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Arvinlabs/llama-supervisor/internal/command"
+	"github.com/Arvinlabs/llama-supervisor/internal/config"
+	"github.com/Arvinlabs/llama-supervisor/internal/idle"
 )
 
-type probeConfig struct {
-	apiKey       string
-	model        string
-	prompt       string
-	maxTokens    int
-	repeatLimit  int
-	successLimit int // normal content reaching this many cumulative characters is declared healthy early without waiting for generation to end; 0 disables it
-	timeout      time.Duration
+type Config struct {
+	ApiKey       string
+	Model        string
+	Prompt       string
+	MaxTokens    int
+	RepeatLimit  int
+	SuccessLimit int // normal content reaching this many cumulative characters is declared healthy early without waiting for generation to end; 0 disables it
+	Timeout      time.Duration
 }
 
-// buildProbeConfig builds the effective probe parameters from the probe config group (filling in
+// BuildProbeConfig builds the effective probe parameters from the probe config group (filling in
 // defaults); apiKey is the global apiKey
-func buildProbeConfig(g *ProbeGroup, apiKey string) probeConfig {
-	pc := probeConfig{
-		apiKey:       apiKey,
-		model:        "default",
-		prompt:       "hi",
-		maxTokens:    64,
-		repeatLimit:  10,
-		successLimit: 20,
-		timeout:      5 * time.Second,
+func BuildProbeConfig(g *config.ProbeGroup, apiKey string) Config {
+	pc := Config{
+		ApiKey:       apiKey,
+		Model:        "default",
+		Prompt:       "hi",
+		MaxTokens:    64,
+		RepeatLimit:  10,
+		SuccessLimit: 20,
+		Timeout:      5 * time.Second,
 	}
 	if g.Model != "" {
-		pc.model = g.Model
+		pc.Model = g.Model
 	}
 	if g.Prompt != "" {
-		pc.prompt = g.Prompt
+		pc.Prompt = g.Prompt
 	}
 	if g.MaxTokens > 0 {
-		pc.maxTokens = g.MaxTokens
+		pc.MaxTokens = g.MaxTokens
 	}
 	if g.RepeatLimit > 0 {
-		pc.repeatLimit = g.RepeatLimit
+		pc.RepeatLimit = g.RepeatLimit
 	}
 	if g.SuccessLimit > 0 {
-		pc.successLimit = g.SuccessLimit
+		pc.SuccessLimit = g.SuccessLimit
 	} else if g.SuccessLimit < 0 {
-		pc.successLimit = 0 // a negative value disables early success
+		pc.SuccessLimit = 0 // a negative value disables early success
 	}
 	if g.Timeout > 0 {
-		pc.timeout = time.Duration(g.Timeout) * time.Second
+		pc.Timeout = time.Duration(g.Timeout) * time.Second
 	}
 	// keep the early-success threshold at least the repeat threshold, so a degenerate stream is flagged unhealthy before it can be declared healthy early
-	if pc.successLimit > 0 && pc.successLimit < pc.repeatLimit {
-		pc.successLimit = pc.repeatLimit
+	if pc.SuccessLimit > 0 && pc.SuccessLimit < pc.RepeatLimit {
+		pc.SuccessLimit = pc.RepeatLimit
 	}
 	return pc
 }
 
-// probePolicy probe strategy: on idle timeout probe the backend, and run probe.command when unhealthy
-type probePolicy struct {
+// Policy probe strategy: on idle timeout probe the backend, and run probe.command when unhealthy
+type Policy struct {
 	// ctx is the server-level ctx (driven by the exit signal); the probe and command execution do
 	// not follow the user request ctx, so an early user disconnect cannot cancel the probe and
 	// cause a false unhealthy verdict
 	ctx     context.Context
-	tracker *idleTracker
+	tracker *idle.Tracker
 	cmd     string
 	backend string
-	probe   probeConfig
+	probe   Config
 }
 
-func newProbePolicy(ctx context.Context, backend string, g *ProbeGroup, interval time.Duration, apiKey string) *probePolicy {
-	p := &probePolicy{
+func New(ctx context.Context, backend string, g *config.ProbeGroup, interval time.Duration, apiKey string) *Policy {
+	p := &Policy{
 		ctx:     ctx,
 		cmd:     g.Command,
 		backend: backend,
-		probe:   buildProbeConfig(g, apiKey),
+		probe:   BuildProbeConfig(g, apiKey),
 	}
-	p.tracker = newIdleTracker(interval, func(ctx context.Context) bool {
+	p.tracker = idle.New(interval, func(ctx context.Context) bool {
 		return p.runProbe(ctx)
 	})
 	return p
 }
 
-func (p *probePolicy) onHTTPRequest() {
-	p.tracker.onHTTPRequest()
+func (p *Policy) OnHTTPRequest() {
+	p.tracker.OnHTTPRequest()
 }
 
-func (p *probePolicy) consumeIdle(_ context.Context) bool {
+func (p *Policy) ConsumeIdle(_ context.Context) bool {
 	// the passed ctx is the user request ctx; the probe does not inherit it and uses the server-level ctx instead
-	return p.tracker.consumeIdle(p.ctx)
+	return p.tracker.ConsumeIdle(p.ctx)
 }
 
 // runProbe probes the backend; on unhealthy it runs probe.command and returns whether the command was actually executed
-func (p *probePolicy) runProbe(ctx context.Context) bool {
+func (p *Policy) runProbe(ctx context.Context) bool {
 	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds",
-		p.backend, p.probe.model, p.probe.prompt, p.probe.maxTokens, p.probe.repeatLimit, p.probe.successLimit, int(p.probe.timeout.Seconds()))
+		p.backend, p.probe.Model, p.probe.Prompt, p.probe.MaxTokens, p.probe.RepeatLimit, p.probe.SuccessLimit, int(p.probe.Timeout.Seconds()))
 	healthy, err := probeBackend(ctx, p.backend, p.probe)
 	if healthy {
 		log.Print("[probe] backend looks healthy")
@@ -110,20 +114,20 @@ func (p *probePolicy) runProbe(ctx context.Context) bool {
 		log.Print("[probe] no command configured, skip")
 		return false
 	}
-	return runCommand(ctx, "health", p.cmd)
+	return command.RunCommand(ctx, "health", p.cmd)
 }
 
 // probeBackend probes whether the backend is usable (via a streaming chat completion)
-func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, pc.timeout)
+func probeBackend(ctx context.Context, backend string, pc Config) (healthy bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, pc.Timeout)
 	defer cancel()
 
 	body, err := json.Marshal(map[string]any{
-		"model": pc.model,
+		"model": pc.Model,
 		"messages": []map[string]string{
-			{"role": "user", "content": pc.prompt},
+			{"role": "user", "content": pc.Prompt},
 		},
-		"max_tokens": pc.maxTokens,
+		"max_tokens": pc.MaxTokens,
 		"stream":     true,
 	})
 	if err != nil {
@@ -135,8 +139,8 @@ func probeBackend(ctx context.Context, backend string, pc probeConfig) (healthy 
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if pc.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+pc.apiKey)
+	if pc.ApiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+pc.ApiKey)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -186,12 +190,12 @@ func (c *repeatChecker) check(field string, s string) (bool, error) {
 }
 
 // probeBackendStreaming reads the SSE stream and checks whether the content is degenerate (repeated tokens)
-func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
+func probeBackendStreaming(body io.Reader, pc Config) (bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	reasoningCheck := &repeatChecker{limit: pc.repeatLimit}
-	contentCheck := &repeatChecker{limit: pc.repeatLimit}
+	reasoningCheck := &repeatChecker{limit: pc.RepeatLimit}
+	contentCheck := &repeatChecker{limit: pc.RepeatLimit}
 	totalLen := 0 // cumulative normal generated characters (reasoning_content + content)
 
 	for scanner.Scan() {
@@ -219,7 +223,7 @@ func probeBackendStreaming(body io.Reader, pc probeConfig) (bool, error) {
 		}
 		totalLen += len(delta.ReasoningContent) + len(delta.Content)
 		// early success: content is normal and the cumulative length reached successLimit, no need to wait for generation to end
-		if pc.successLimit > 0 && totalLen >= pc.successLimit {
+		if pc.SuccessLimit > 0 && totalLen >= pc.SuccessLimit {
 			return true, nil
 		}
 	}

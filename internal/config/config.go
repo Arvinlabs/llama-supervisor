@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -96,23 +96,23 @@ type Config struct {
 	Debug          *DebugGroup    `yaml:"debug"`
 }
 
-// restartInterval returns the restart group's idle threshold (configured in seconds)
-func restartInterval(cfg Config) time.Duration {
+// RestartInterval returns the restart group's idle threshold (configured in seconds)
+func RestartInterval(cfg Config) time.Duration {
 	if cfg.Restart.Enabled() && cfg.Restart.Interval > 0 {
 		return time.Duration(cfg.Restart.Interval) * time.Second
 	}
 	return defaultInterval
 }
 
-// probeInterval returns the probe group's idle threshold (configured in seconds)
-func probeInterval(cfg Config) time.Duration {
+// ProbeInterval returns the probe group's idle threshold (configured in seconds)
+func ProbeInterval(cfg Config) time.Duration {
 	if cfg.Probe.Enabled() && cfg.Probe.Interval > 0 {
 		return time.Duration(cfg.Probe.Interval) * time.Second
 	}
 	return defaultInterval
 }
 
-func loadConfig(path string) (Config, error) {
+func LoadConfig(path string) (Config, error) {
 	var cfg Config
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -127,7 +127,7 @@ func loadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-func secretMask(s string) string {
+func SecretMask(s string) string {
 	if s == "" {
 		return "(empty)"
 	}

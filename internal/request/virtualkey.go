@@ -1,4 +1,4 @@
-package main
+package request
 
 import (
 	"log"
@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// virtualKeyPolicy is a request plugin (requestPlugin + inboundChecker) implementing
+// virtualKeyPolicy is a request plugin (plugin + inboundChecker) implementing
 // virtual API key authentication: clients present one of the
 // configured virtual keys in the OpenAI format ("Authorization: Bearer <key>", the
 // llama.cpp-style raw header value and the api_key query parameter are accepted too).
@@ -20,10 +20,9 @@ type virtualKeyPolicy struct {
 
 // compile-time proof that virtualKeyPolicy is a request plugin with inbound checking
 var (
-	_ requestPlugin  = (*virtualKeyPolicy)(nil)
+	_ plugin         = (*virtualKeyPolicy)(nil)
 	_ inboundChecker = (*virtualKeyPolicy)(nil)
 )
-
 
 // newVirtualKeyPolicy builds the policy from the configured key list (empty entries ignored)
 func newVirtualKeyPolicy(keys []string, backendKey string) *virtualKeyPolicy {
@@ -49,9 +48,9 @@ func (p *virtualKeyPolicy) clientKey(r *http.Request) string {
 	return r.URL.Query().Get("api_key")
 }
 
-// authorize reports whether the presented key is one of the configured virtual keys,
+// Authorize reports whether the presented key is one of the configured virtual keys,
 // logging the rejection on failure
-func (p *virtualKeyPolicy) authorize(r *http.Request) bool {
+func (p *virtualKeyPolicy) Authorize(r *http.Request) bool {
 	if _, ok := p.keys[p.clientKey(r)]; ok {
 		return true
 	}
@@ -60,10 +59,10 @@ func (p *virtualKeyPolicy) authorize(r *http.Request) bool {
 	return false
 }
 
-// modifyRequest re-signs the outbound request with the real backend API key: the virtual
+// ModifyRequest re-signs the outbound request with the real backend API key: the virtual
 // key is stripped, and if a backend key is configured it is sent as Bearer <key>, otherwise
 // no Authorization header is sent at all. The api_key query parameter is dropped too
-func (p *virtualKeyPolicy) modifyRequest(r *http.Request) {
+func (p *virtualKeyPolicy) ModifyRequest(r *http.Request) {
 	r.Header.Del("Authorization")
 	if p.backendKey != "" {
 		r.Header.Set("Authorization", "Bearer "+p.backendKey)
@@ -73,4 +72,3 @@ func (p *virtualKeyPolicy) modifyRequest(r *http.Request) {
 		r.URL.RawQuery = q.Encode()
 	}
 }
-

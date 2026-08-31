@@ -1,4 +1,4 @@
-package main
+package probe
 
 import (
 	"context"
@@ -7,32 +7,34 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Arvinlabs/llama-supervisor/internal/config"
 )
 
 func TestBuildProbeConfigDefaults(t *testing.T) {
-	pc := buildProbeConfig(&ProbeGroup{Enable: true, Interval: 30, Command: "cmd"}, "")
-	if pc.model != "default" || pc.prompt != "hi" || pc.maxTokens != 64 || pc.repeatLimit != 10 || pc.successLimit != 20 || pc.timeout != 5*time.Second {
+	pc := BuildProbeConfig(&config.ProbeGroup{Enable: true, Interval: 30, Command: "cmd"}, "")
+	if pc.Model != "default" || pc.Prompt != "hi" || pc.MaxTokens != 64 || pc.RepeatLimit != 10 || pc.SuccessLimit != 20 || pc.Timeout != 5*time.Second {
 		t.Fatalf("unexpected defaults: %+v", pc)
 	}
 }
 
 func TestBuildProbeConfigOverrides(t *testing.T) {
-	pc := buildProbeConfig(&ProbeGroup{
+	pc := BuildProbeConfig(&config.ProbeGroup{
 		Enable: true, Interval: 30, Command: "cmd",
 		Model: "m", Prompt: "p", MaxTokens: 10, RepeatLimit: 5, SuccessLimit: 8, Timeout: 1,
 	}, "k")
-	if pc.apiKey != "k" || pc.model != "m" || pc.prompt != "p" || pc.maxTokens != 10 || pc.repeatLimit != 5 || pc.successLimit != 8 || pc.timeout != time.Second {
+	if pc.ApiKey != "k" || pc.Model != "m" || pc.Prompt != "p" || pc.MaxTokens != 10 || pc.RepeatLimit != 5 || pc.SuccessLimit != 8 || pc.Timeout != time.Second {
 		t.Fatalf("unexpected overrides: %+v", pc)
 	}
 }
 
 func TestBuildProbeConfigClampsAndDisablesSuccessLimit(t *testing.T) {
 	// when successLimit is below repeatLimit it is raised to repeatLimit, so a degenerate stream is not declared healthy early
-	if pc := buildProbeConfig(&ProbeGroup{RepeatLimit: 20, SuccessLimit: 5}, ""); pc.successLimit != 20 {
+	if pc := BuildProbeConfig(&config.ProbeGroup{RepeatLimit: 20, SuccessLimit: 5}, ""); pc.SuccessLimit != 20 {
 		t.Fatalf("expected clamp to repeatLimit, got %+v", pc)
 	}
 	// a negative value disables early success
-	if pc := buildProbeConfig(&ProbeGroup{SuccessLimit: -1}, ""); pc.successLimit != 0 {
+	if pc := BuildProbeConfig(&config.ProbeGroup{SuccessLimit: -1}, ""); pc.SuccessLimit != 0 {
 		t.Fatalf("expected disabled, got %+v", pc)
 	}
 }
@@ -67,7 +69,7 @@ func TestProbeBackendStreamingHealthy(t *testing.T) {
 		[2]string{"me think", ""},
 		[2]string{"", "Final "},
 		[2]string{"", "answer"},
-	)), probeConfig{repeatLimit: 20})
+	)), Config{RepeatLimit: 20})
 	if !healthy || err != nil {
 		t.Fatalf("expected healthy, got healthy=%v err=%v", healthy, err)
 	}
@@ -80,7 +82,7 @@ func TestProbeBackendStreamingDegenerateReasoning(t *testing.T) {
 		[2]string{"aaaaa", ""},
 		[2]string{"aaaaa", ""},
 		[2]string{"aaaaa", ""},
-	)), probeConfig{repeatLimit: 20})
+	)), Config{RepeatLimit: 20})
 	if healthy || err == nil {
 		t.Fatalf("expected unhealthy, got healthy=%v err=%v", healthy, err)
 	}
@@ -94,7 +96,7 @@ func TestProbeBackendStreamingDegenerateContent(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		pairs = append(pairs, [2]string{"", "x"})
 	}
-	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), probeConfig{repeatLimit: 20})
+	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), Config{RepeatLimit: 20})
 	if healthy || err == nil {
 		t.Fatalf("expected unhealthy, got healthy=%v err=%v", healthy, err)
 	}
@@ -110,7 +112,7 @@ func TestProbeBackendStreamingIndependentCounters(t *testing.T) {
 	for i := 0; i < 15; i++ {
 		pairs = append(pairs, [2]string{"", "x"})
 	}
-	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), probeConfig{repeatLimit: 20})
+	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), Config{RepeatLimit: 20})
 	if !healthy || err != nil {
 		t.Fatalf("expected healthy, got healthy=%v err=%v", healthy, err)
 	}
@@ -118,14 +120,14 @@ func TestProbeBackendStreamingIndependentCounters(t *testing.T) {
 
 func TestProbeBackendStreamingStopsAtDone(t *testing.T) {
 	body := "data: [DONE]\n\n" + `data: {"choices":[{"delta":{"reasoning_content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}` + "\n\n"
-	healthy, err := probeBackendStreaming(strings.NewReader(body), probeConfig{repeatLimit: 20})
+	healthy, err := probeBackendStreaming(strings.NewReader(body), Config{RepeatLimit: 20})
 	if !healthy || err != nil {
 		t.Fatalf("content after [DONE] must be ignored, got healthy=%v err=%v", healthy, err)
 	}
 }
 
 func TestProbeBackend(t *testing.T) {
-	pc := probeConfig{repeatLimit: 20, timeout: time.Second}
+	pc := Config{RepeatLimit: 20, Timeout: time.Second}
 
 	t.Run("healthy", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +175,7 @@ func TestProbeBackendEarlySuccess(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 
-	pc := probeConfig{repeatLimit: 20, successLimit: 16, timeout: 2 * time.Second}
+	pc := Config{RepeatLimit: 20, SuccessLimit: 16, Timeout: 2 * time.Second}
 	start := time.Now()
 	healthy, err := probeBackend(t.Context(), srv.URL, pc)
 	if !healthy || err != nil {
@@ -190,7 +192,7 @@ func TestProbeBackendStreamingEarlySuccessNotMaskDegenerate(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		pairs = append(pairs, [2]string{"", "aaaaaaaa"})
 	}
-	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), probeConfig{repeatLimit: 20, successLimit: 32})
+	healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), Config{RepeatLimit: 20, SuccessLimit: 32})
 	if healthy || err == nil {
 		t.Fatalf("expected unhealthy, got healthy=%v err=%v", healthy, err)
 	}
@@ -206,15 +208,13 @@ func TestProbePolicySurvivesRequestCtxCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := newProbePolicy(t.Context(), srv.URL, &ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour, "")
+	p := New(t.Context(), srv.URL, &config.ProbeGroup{Enable: true, Interval: 1, Command: "true"}, time.Hour, "")
 	// force the idle deadline to be due
-	p.tracker.mu.Lock()
-	p.tracker.deadline = time.Now().Add(-time.Second)
-	p.tracker.mu.Unlock()
+	p.tracker.ForceDue()
 
 	reqCtx, cancel := context.WithCancel(context.Background())
 	cancel() // simulate the user disconnecting early
-	healthy := p.consumeIdle(reqCtx)
+	healthy := p.ConsumeIdle(reqCtx)
 	if !got {
 		t.Fatal("probe should still run after user request ctx canceled")
 	}

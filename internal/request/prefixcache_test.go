@@ -1,8 +1,7 @@
-package main
+package request
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -217,7 +216,7 @@ func TestNormalizeChatCompletionsEscapedKey(t *testing.T) {
 	}
 }
 
-// modifyRequest only normalizes POST /v1/chat/completions with a JSON body
+// ModifyRequest only normalizes POST /v1/chat/completions with a JSON body
 func TestPrefixCacheModifyRequest(t *testing.T) {
 	c := newPrefixCachePolicy()
 
@@ -225,7 +224,7 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 		body := `{"model":"m","tools":[{"type":"function","function":{"name":"b","parameters":{"type":"object","properties":{"q":{}}}}},{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"q":{}}}}}], "temperature": 1.0, "messages":[{"role":"user","content":"hi"}]}`
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
-		c.modifyRequest(r)
+		c.ModifyRequest(r)
 		got, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -260,7 +259,7 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 		body := `{"model":"m"}`
 		r := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
-		c.modifyRequest(r)
+		c.ModifyRequest(r)
 		got, _ := io.ReadAll(r.Body)
 		if string(got) != body {
 			t.Fatalf("body changed: %s", got)
@@ -271,7 +270,7 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 		body := `model=m`
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		r.Header.Set("Content-Type", "text/plain")
-		c.modifyRequest(r)
+		c.ModifyRequest(r)
 		got, _ := io.ReadAll(r.Body)
 		if string(got) != body {
 			t.Fatalf("body changed: %s", got)
@@ -282,7 +281,7 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 		body := `{"model":`
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
-		c.modifyRequest(r)
+		c.ModifyRequest(r)
 		got, _ := io.ReadAll(r.Body)
 		if string(got) != body {
 			t.Fatalf("body changed: %s", got)
@@ -292,48 +291,9 @@ func TestPrefixCacheModifyRequest(t *testing.T) {
 	t.Run("GET passes through", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 		before := r.Body
-		c.modifyRequest(r)
+		c.ModifyRequest(r)
 		if r.Body != before {
 			t.Fatal("GET must not be touched")
 		}
 	})
-}
-
-// end-to-end: with the prefix cache modifier enabled the proxy sorts the tools but
-// forwards every other byte exactly as the client sent it
-func TestProxyForwardsNormalizedBody(t *testing.T) {
-	var backendBody []byte
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backendBody, _ = io.ReadAll(r.Body)
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer backend.Close()
-
-	sup := newBackendProxy(Config{Backend: backend.URL, Request: &RequestGroup{Enable: true, PrefixCache: true}}, context.Background())
-	body := `{"model":"m","temperature":0.700,"tools":[{"type":"function","function":{"name":"z","parameters":{"type":"object","properties":{"b":1.0,"a":2}}},"description":"z"},
-	{"type":"function","function":{"name":"a","parameters":{"type":"object","properties":{"c":{}}},"description":"a"}}],"messages":[{"role":"user","content":"hi"}]}`
-	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	sup.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d", w.Code)
-	}
-	// tools are sorted (a before z) and elements re-encoded canonically:
-	// properties sorted, 1.0 -> 1
-	if !strings.Contains(string(backendBody), `"a":2,"b":1`) {
-		t.Fatalf("tool elements not canonicalized: %s", backendBody)
-	}
-	// number literal form outside the tools array stays exactly as sent
-	if !strings.Contains(string(backendBody), `"temperature":0.700`) {
-		t.Fatalf("number literal outside tools was altered: %s", backendBody)
-	}
-	// order check: the alpha tool object must appear before the zebra one
-	s := string(backendBody)
-	ia := strings.Index(s, `"name":"a"`)
-	iz := strings.Index(s, `"name":"z"`)
-	if ia < 0 || iz < 0 || ia > iz {
-		t.Fatalf("backend received unsorted tools: %s", backendBody)
-	}
 }

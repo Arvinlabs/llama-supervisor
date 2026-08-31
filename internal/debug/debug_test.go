@@ -1,18 +1,20 @@
-package main
+package debug
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Arvinlabs/llama-supervisor/internal/config"
 )
 
 func TestDebugHandleRunsCommand(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true, Command: "true"})
+	p := New(&config.DebugGroup{Enable: true, Command: "true"})
 
 	req := httptest.NewRequest(http.MethodGet, p.path, nil)
 	w := httptest.NewRecorder()
-	if !p.handle(w, req) {
+	if !p.Handle(w, req) {
 		t.Fatal("expected the debug endpoint to handle the request")
 	}
 	if w.Code != http.StatusOK {
@@ -28,20 +30,20 @@ func TestDebugHandleRunsCommand(t *testing.T) {
 }
 
 func TestDebugHandlePost(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true, Command: "true"})
+	p := New(&config.DebugGroup{Enable: true, Command: "true"})
 	req := httptest.NewRequest(http.MethodPost, p.path, nil)
 	w := httptest.NewRecorder()
-	handled := p.handle(w, req)
+	handled := p.Handle(w, req)
 	if !handled || w.Code != http.StatusOK {
 		t.Fatalf("POST should be accepted, handled=%v code=%d", handled, w.Code)
 	}
 }
 
 func TestDebugHandlePathMiss(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true, Command: "true"})
+	p := New(&config.DebugGroup{Enable: true, Command: "true"})
 	req := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
-	if p.handle(w, req) {
+	if p.Handle(w, req) {
 		t.Fatal("non-debug paths must not be handled")
 	}
 	if w.Body.Len() != 0 {
@@ -50,10 +52,10 @@ func TestDebugHandlePathMiss(t *testing.T) {
 }
 
 func TestDebugHandleMethodNotAllowed(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true, Command: "true"})
+	p := New(&config.DebugGroup{Enable: true, Command: "true"})
 	req := httptest.NewRequest(http.MethodPut, p.path, nil)
 	w := httptest.NewRecorder()
-	if !p.handle(w, req) {
+	if !p.Handle(w, req) {
 		t.Fatal("the debug path must be handled even for other methods")
 	}
 	if w.Code != http.StatusMethodNotAllowed {
@@ -62,19 +64,19 @@ func TestDebugHandleMethodNotAllowed(t *testing.T) {
 }
 
 func TestDebugHandleNoCommand(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true})
+	p := New(&config.DebugGroup{Enable: true})
 	req := httptest.NewRequest(http.MethodGet, p.path, nil)
 	w := httptest.NewRecorder()
-	if !p.handle(w, req) || w.Code != http.StatusBadRequest {
+	if !p.Handle(w, req) || w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
 
 func TestDebugHandleFailingCommand(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true, Command: "false"})
+	p := New(&config.DebugGroup{Enable: true, Command: "false"})
 	req := httptest.NewRequest(http.MethodGet, p.path, nil)
 	w := httptest.NewRecorder()
-	if !p.handle(w, req) {
+	if !p.Handle(w, req) {
 		t.Fatal("expected the debug endpoint to handle the request")
 	}
 	if w.Code != http.StatusInternalServerError {
@@ -90,11 +92,11 @@ func TestDebugHandleFailingCommand(t *testing.T) {
 }
 
 func TestDebugHandleDefaultPath(t *testing.T) {
-	p := newDebugPolicy(&DebugGroup{Enable: true, Command: "true"})
-	if p.path != defaultDebugPath {
-		t.Fatalf("path = %q, want %q", p.path, defaultDebugPath)
+	p := New(&config.DebugGroup{Enable: true, Command: "true"})
+	if p.path != DefaultDebugPath {
+		t.Fatalf("path = %q, want %q", p.path, DefaultDebugPath)
 	}
-	p = newDebugPolicy(&DebugGroup{Enable: true, Path: "/x", Command: "true"})
+	p = New(&config.DebugGroup{Enable: true, Path: "/x", Command: "true"})
 	if p.path != "/x" {
 		t.Fatalf("path = %q, want /x", p.path)
 	}

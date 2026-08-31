@@ -1,4 +1,4 @@
-package main
+package watchdog
 
 import (
 	"context"
@@ -9,39 +9,42 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/Arvinlabs/llama-supervisor/internal/command"
+	"github.com/Arvinlabs/llama-supervisor/internal/config"
 )
 
 // watchdogConfig effective watchdog parameters (defaults filled in)
-type watchdogConfig struct {
-	interval time.Duration // sampling interval in seconds, default 2 (frequent sampling to catch fast output loops early)
-	maxRate  float64       // max generation speed (t/s); above it is declared unhealthy, default 300
-	times    int           // consecutive over-speed samples required to declare unhealthy, default 2
-	pause    time.Duration // how long to fully pause (no fetching) after a trigger or a /slots fetch failure, default 30s
-	command  string        // shell command run after declaring unhealthy
-	verbose  bool          // whether to log the measured speed on normal windows, default false
+type Config struct {
+	Interval time.Duration // sampling interval in seconds, default 2 (frequent sampling to catch fast output loops early)
+	MaxRate  float64       // max generation speed (t/s); above it is declared unhealthy, default 300
+	Times    int           // consecutive over-speed samples required to declare unhealthy, default 2
+	Pause    time.Duration // how long to fully pause (no fetching) after a trigger or a /slots fetch failure, default 30s
+	Command  string        // shell command run after declaring unhealthy
+	Verbose  bool          // whether to log the measured speed on normal windows, default false
 }
 
-// buildWatchdogConfig builds the effective parameters from the watchdog config group (filling in defaults)
-func buildWatchdogConfig(g *WatchdogGroup) watchdogConfig {
-	wc := watchdogConfig{
-		interval: 2 * time.Second,
-		maxRate:  300,
-		times:    2,
-		pause:    30 * time.Second,
-		command:  g.Command,
-		verbose:  g.Verbose,
+// BuildWatchdogConfig builds the effective parameters from the watchdog config group (filling in defaults)
+func BuildWatchdogConfig(g *config.WatchdogGroup) Config {
+	wc := Config{
+		Interval: 2 * time.Second,
+		MaxRate:  300,
+		Times:    2,
+		Pause:    30 * time.Second,
+		Command:  g.Command,
+		Verbose:  g.Verbose,
 	}
 	if g.Interval > 0 {
-		wc.interval = time.Duration(g.Interval) * time.Second
+		wc.Interval = time.Duration(g.Interval) * time.Second
 	}
 	if g.MaxRate > 0 {
-		wc.maxRate = g.MaxRate
+		wc.MaxRate = g.MaxRate
 	}
 	if g.Times > 0 {
-		wc.times = g.Times
+		wc.Times = g.Times
 	}
 	if g.Pause > 0 {
-		wc.pause = time.Duration(g.Pause) * time.Second
+		wc.Pause = time.Duration(g.Pause) * time.Second
 	}
 	return wc
 }
@@ -61,36 +64,41 @@ func decideFast(prev, cur watchdogState, elapsed time.Duration, maxRate float64)
 	return float64(cur.nDecoded-prev.nDecoded)/elapsed.Seconds() > maxRate
 }
 
-// watchdogPolicy watchdog strategy: sample the backend /slots frequently, and when the generation
+// Policy watchdog strategy: sample the backend /slots frequently, and when the generation
 // speed keeps exceeding the threshold (very likely an output loop) run watchdog.command (similar to
 // restart); after a trigger or a /slots fetch failure the watchdog fully pauses (no fetching at
 // all) for pause seconds
-type watchdogPolicy struct {
+type Policy struct {
 	mu         sync.Mutex
-	config     watchdogConfig
+	config     Config
 	backend    string
 	apiKey     string // Bearer API key sent when sampling /slots (none when empty)
 	prev       watchdogState
 	wedges     int
 	pauseUntil time.Time // fully paused (no fetching) before this moment
 	skipNext   bool      // after a pause the first sample only rebuilds the baseline (no rate check)
-	lastFail   string // last fetch error message; only logged when it changes
+	lastFail   string    // last fetch error message; only logged when it changes
 }
 
 // newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey
-func newWatchdogPolicy(g *WatchdogGroup, backend string, apiKey string) *watchdogPolicy {
-	return &watchdogPolicy{
-		config:  buildWatchdogConfig(g),
+func New(g *config.WatchdogGroup, backend string, apiKey string) *Policy {
+	return &Policy{
+		config:  BuildWatchdogConfig(g),
 		backend: backend,
 		apiKey:  apiKey,
 	}
+}
+
+// Interval returns the effective sampling interval
+func (w *Policy) Interval() time.Duration {
+	return w.config.Interval
 }
 
 // tick performs one sample: fetch /slots, compare with the previous sample, and run the command
 // only after `times` consecutive over-speed samples to avoid a single burst triggering it;
 // after a trigger (or a /slots fetch failure) the watchdog fully pauses for pause seconds
 // (no fetching at all), and the first sample after the pause only rebuilds the baseline
-func (w *watchdogPolicy) tick(ctx context.Context) {
+func (w *Policy) Tick(ctx context.Context) {
 	w.mu.Lock()
 	if time.Now().Before(w.pauseUntil) { // fully paused: no fetch at all
 		w.mu.Unlock()
@@ -110,9 +118,9 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 		w.wedges = 0
 		// start a full pause on a fresh failure (an active pause is not extended tick by tick)
 		if !time.Now().Before(w.pauseUntil) {
-			w.pauseUntil = time.Now().Add(w.config.pause)
+			w.pauseUntil = time.Now().Add(w.config.Pause)
 			w.skipNext = true
-			log.Printf("[watchdog] fully paused for %s after /slots fetch failure", w.config.pause)
+			log.Printf("[watchdog] fully paused for %s after /slots fetch failure", w.config.Pause)
 		}
 		w.mu.Unlock()
 		return
@@ -131,15 +139,15 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 	w.prev = state
 	w.mu.Unlock()
 
-	if !decideFast(prev, state, w.config.interval, w.config.maxRate) {
+	if !decideFast(prev, state, w.config.Interval, w.config.MaxRate) {
 		w.mu.Lock()
 		w.wedges = 0
 		w.mu.Unlock()
 		// when verbose is on and a generation request is active in both windows, info-log the measured speed (the first window has no valid rate, no log)
-		if w.config.verbose && state.processing && prev.processing {
-			rate := float64(state.nDecoded-prev.nDecoded) / w.config.interval.Seconds()
+		if w.config.Verbose && state.processing && prev.processing {
+			rate := float64(state.nDecoded-prev.nDecoded) / w.config.Interval.Seconds()
 			log.Printf("[watchdog] ok: n_decoded %d -> %d (%.0f t/s <= maxRate %gt/s)",
-				prev.nDecoded, state.nDecoded, rate, w.config.maxRate)
+				prev.nDecoded, state.nDecoded, rate, w.config.MaxRate)
 		}
 		return
 	}
@@ -147,26 +155,26 @@ func (w *watchdogPolicy) tick(ctx context.Context) {
 	w.mu.Lock()
 	w.wedges++
 	n := w.wedges
-	need := w.config.times
+	need := w.config.Times
 	w.mu.Unlock()
 	if n < need {
 		return
 	}
 
-	rate := float64(state.nDecoded-prev.nDecoded) / w.config.interval.Seconds()
+	rate := float64(state.nDecoded-prev.nDecoded) / w.config.Interval.Seconds()
 	log.Printf("[watchdog] abnormally fast: n_decoded %d -> %d (%.0f t/s > maxRate %gt/s), restarting backend",
-		prev.nDecoded, state.nDecoded, rate, w.config.maxRate)
+		prev.nDecoded, state.nDecoded, rate, w.config.MaxRate)
 	w.mu.Lock()
-	w.pauseUntil = time.Now().Add(w.config.pause)
+	w.pauseUntil = time.Now().Add(w.config.Pause)
 	w.wedges = 0
 	w.skipNext = true
-	log.Printf("[watchdog] fully paused for %s after trigger", w.config.pause)
+	log.Printf("[watchdog] fully paused for %s after trigger", w.config.Pause)
 	w.mu.Unlock()
-	if w.config.command == "" {
+	if w.config.Command == "" {
 		log.Print("[watchdog] no command configured, skip")
 		return
 	}
-	runCommand(ctx, "watchdog", w.config.command)
+	command.RunCommand(ctx, "watchdog", w.config.Command)
 }
 
 // slotNextToken is a field of slot next_token[] elements in the /slots response (llama.cpp)

@@ -1,4 +1,4 @@
-package main
+package request
 
 import (
 	"io"
@@ -36,7 +36,7 @@ func TestVirtualKeyClientKeyExtraction(t *testing.T) {
 	}
 }
 
-// authorize accepts configured keys only
+// Authorize accepts configured keys only
 func TestVirtualKeyAuthorize(t *testing.T) {
 	p := newTestVirtualKeyPolicy("bk")
 	mk := func(auth string) *http.Request {
@@ -47,18 +47,18 @@ func TestVirtualKeyAuthorize(t *testing.T) {
 		return r
 	}
 	for _, auth := range []string{"Bearer key-a", "Bearer key-b", "key-a"} {
-		if !p.authorize(mk(auth)) {
-			t.Errorf("authorize(%q) = false, want true", auth)
+		if !p.Authorize(mk(auth)) {
+			t.Errorf("Authorize(%q) = false, want true", auth)
 		}
 	}
 	for _, auth := range []string{"Bearer nope", "", "Bearer "} {
-		if p.authorize(mk(auth)) {
-			t.Errorf("authorize(%q) = true, want false", auth)
+		if p.Authorize(mk(auth)) {
+			t.Errorf("Authorize(%q) = true, want false", auth)
 		}
 	}
 }
 
-// modifyRequest re-signs the outbound request: the virtual key is replaced by the
+// ModifyRequest re-signs the outbound request: the virtual key is replaced by the
 // backend key, or dropped when no backend key is configured; the api_key query
 // parameter is always dropped
 func TestVirtualKeyModifyRequest(t *testing.T) {
@@ -80,12 +80,12 @@ func TestVirtualKeyModifyRequest(t *testing.T) {
 		}
 		r := httptest.NewRequest(http.MethodPost, u, nil)
 		r.Header.Set("Authorization", tc.inAuth)
-		p.modifyRequest(r)
+		p.ModifyRequest(r)
 		if got := r.Header.Get("Authorization"); got != tc.wantAuth {
-			t.Errorf("modifyRequest(backend=%q): Authorization = %q, want %q", tc.backendKey, got, tc.wantAuth)
+			t.Errorf("ModifyRequest(backend=%q): Authorization = %q, want %q", tc.backendKey, got, tc.wantAuth)
 		}
 		if got := r.URL.RawQuery; got != tc.wantQuery {
-			t.Errorf("modifyRequest(backend=%q): RawQuery = %q, want %q", tc.backendKey, got, tc.wantQuery)
+			t.Errorf("ModifyRequest(backend=%q): RawQuery = %q, want %q", tc.backendKey, got, tc.wantQuery)
 		}
 	}
 }
@@ -93,7 +93,7 @@ func TestVirtualKeyModifyRequest(t *testing.T) {
 // the policy writes an OpenAI-format 401 JSON error for a rejected request
 func TestWriteUnauthorized(t *testing.T) {
 	w := httptest.NewRecorder()
-	(&requestPolicy{}).writeUnauthorized(w)
+	(&Policy{}).writeUnauthorized(w)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
 	}

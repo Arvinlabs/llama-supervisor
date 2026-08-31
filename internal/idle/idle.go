@@ -1,4 +1,4 @@
-package main
+package idle
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// idleTracker tracks idle state
-type idleTracker struct {
+// Tracker tracks idle state
+type Tracker struct {
 	mu       sync.Mutex
 	interval time.Duration
 	deadline time.Time
@@ -17,10 +17,10 @@ type idleTracker struct {
 	onIdle func(ctx context.Context) bool
 }
 
-// newIdleTracker creates an idle timer. Timing starts at creation (service startup);
+// New creates an idle timer. Timing starts at creation (service startup);
 // onIdle is triggered each time the idle timeout is crossed by a request, and can trigger repeatedly
-func newIdleTracker(interval time.Duration, onIdle func(ctx context.Context) bool) *idleTracker {
-	return &idleTracker{
+func New(interval time.Duration, onIdle func(ctx context.Context) bool) *Tracker {
+	return &Tracker{
 		interval: interval,
 		deadline: time.Now().Add(interval),
 		active:   true,
@@ -28,10 +28,10 @@ func newIdleTracker(interval time.Duration, onIdle func(ctx context.Context) boo
 	}
 }
 
-// newLazyIdleTracker creates a lazy idle timer. Timing starts only after the first request;
+// NewLazy creates a lazy idle timer. Timing starts only after the first request;
 // after triggering onIdle the timer is paused (no timing without requests) and resumes when the next request arrives
-func newLazyIdleTracker(interval time.Duration, onIdle func(ctx context.Context) bool) *idleTracker {
-	return &idleTracker{
+func NewLazy(interval time.Duration, onIdle func(ctx context.Context) bool) *Tracker {
+	return &Tracker{
 		interval: interval,
 		active:   false,
 		lazy:     true,
@@ -39,9 +39,9 @@ func newLazyIdleTracker(interval time.Duration, onIdle func(ctx context.Context)
 	}
 }
 
-// onHTTPRequest activates timing when inactive; while timing and not yet due, it keeps extending the window;
-// when idle is already due it does not reset, leaving the trigger to consumeIdle
-func (t *idleTracker) onHTTPRequest() {
+// OnHTTPRequest activates timing when inactive; while timing and not yet due, it keeps extending the window;
+// when idle is already due it does not reset, leaving the trigger to ConsumeIdle
+func (t *Tracker) OnHTTPRequest() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
@@ -55,9 +55,16 @@ func (t *idleTracker) onHTTPRequest() {
 	}
 }
 
-// consumeIdle checks, when a request arrives, whether the idle timeout was crossed; if so it triggers onIdle
+// ForceDue makes the idle deadline immediately due (test helper)
+func (t *Tracker) ForceDue() {
+	t.mu.Lock()
+	t.deadline = time.Now().Add(-time.Second)
+	t.mu.Unlock()
+}
+
+// ConsumeIdle checks, when a request arrives, whether the idle timeout was crossed; if so it triggers onIdle
 // and returns whether a command was actually run this time
-func (t *idleTracker) consumeIdle(ctx context.Context) bool {
+func (t *Tracker) ConsumeIdle(ctx context.Context) bool {
 	t.mu.Lock()
 	if !t.active || time.Now().Before(t.deadline) {
 		t.mu.Unlock()

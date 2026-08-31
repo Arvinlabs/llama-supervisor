@@ -1,4 +1,4 @@
-package main
+package request
 
 import (
 	"bytes"
@@ -35,13 +35,13 @@ type prefixCachePolicy struct{}
 func newPrefixCachePolicy() *prefixCachePolicy { return &prefixCachePolicy{} }
 
 // compile-time proof that prefixCachePolicy is a request plugin
-var _ requestPlugin = (*prefixCachePolicy)(nil)
+var _ plugin = (*prefixCachePolicy)(nil)
 
 const completionsPath = "/v1/chat/completions"
 
-// modifyRequest only normalizes POST /v1/chat/completions with a JSON body;
+// ModifyRequest only normalizes POST /v1/chat/completions with a JSON body;
 // everything else passes through unchanged
-func (c *prefixCachePolicy) modifyRequest(r *http.Request) {
+func (c *prefixCachePolicy) ModifyRequest(r *http.Request) {
 	if r.Method != http.MethodPost || r.URL.Path != completionsPath {
 		return
 	}
