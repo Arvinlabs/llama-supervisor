@@ -16,6 +16,7 @@ import (
 	"github.com/Arvinlabs/llama-supervisor/internal/probe"
 	"github.com/Arvinlabs/llama-supervisor/internal/request"
 	"github.com/Arvinlabs/llama-supervisor/internal/restart"
+	"github.com/Arvinlabs/llama-supervisor/internal/stats"
 	"github.com/Arvinlabs/llama-supervisor/internal/watchdog"
 )
 
@@ -29,6 +30,7 @@ type Supervisor struct {
 	probe    *probe.Policy    // probe policy (nil when probe is disabled)
 	watchdog *watchdog.Policy // watchdog policy (nil when watchdog is disabled)
 	request  *request.Policy  // request policy (nil when no request sub-feature is enabled)
+	stats    *stats.Policy    // stats policy (nil when stats is disabled); accounts /v1/chat/completions token usage per day
 	debug    *debug.Policy    // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
 }
 
@@ -47,13 +49,23 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	}
 	var rp *httputil.ReverseProxy
 	if cfg.Request.Enabled() {
-		// with a request policy use the Rewrite API (Director has no request hook):
-		// SetURL routes to the backend, then the policy modifiers run on the outbound request
 		p.request = request.New(cfg.Request, cfg.ApiKey)
+	}
+	if cfg.Stats.Enabled() {
+		p.stats = stats.New(cfg.Stats)
+	}
+	if p.request != nil || p.stats != nil {
+		// with a request or stats policy use the Rewrite API (Director has no request hook):
+		// SetURL routes to the backend, then the policy modifiers run on the outbound request
 		rp = &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(backend)
-				p.request.ModifyRequest(pr.Out)
+				if p.request != nil {
+					p.request.ModifyRequest(pr.Out)
+				}
+				if p.stats != nil {
+					p.stats.ModifyRequest(pr.Out)
+				}
 			},
 		}
 	} else {
@@ -81,6 +93,11 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		} else {
 			res.Body = cb
 		}
+		// stats: tap the chat completion response body for the token usage (outermost
+		// wrap, so an injected stream error event still flows through the scanner)
+		if p.stats != nil && res.Request.URL.Path == stats.CompletionsPath {
+			res.Body = p.stats.Wrap(res)
+		}
 		cb.watch()
 		return nil
 	}
@@ -105,8 +122,8 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	if cfg.Watchdog.Enabled() {
 		p.watchdog = watchdog.New(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
 	}
-	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.debug == nil {
-		log.Print("[config] restart, probe, watchdog, request and debug all disabled, proxying only")
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.stats == nil && p.debug == nil {
+		log.Print("[config] restart, probe, watchdog, request, stats and debug all disabled, proxying only")
 	}
 	return p
 }

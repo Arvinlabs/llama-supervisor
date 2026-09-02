@@ -88,6 +88,17 @@ func (g *RequestGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// StatsGroup stats policy config; Enable true (and SavePath non-empty) means enabled
+type StatsGroup struct {
+	Enable     bool   `yaml:"enable"`     // whether enabled
+	SavePath   string `yaml:"savePath"`   // directory the per-day stats JSON files (YYYY-MM-DD.json) are saved to; empty disables the policy
+	RetainDays int    `yaml:"retainDays"` // how many days of stats files are kept (older ones are deleted), default 7
+}
+
+func (g *StatsGroup) Enabled() bool {
+	return g != nil && g.Enable && g.SavePath != ""
+}
+
 type Config struct {
 	Host           string         `yaml:"host"`
 	Port           int            `yaml:"port"`
@@ -98,6 +109,7 @@ type Config struct {
 	Probe          *ProbeGroup    `yaml:"probe"`
 	Watchdog       *WatchdogGroup `yaml:"watchdog"`
 	Request        *RequestGroup  `yaml:"request"`
+	Stats          *StatsGroup    `yaml:"stats"`
 	Debug          *DebugGroup    `yaml:"debug"`
 }
 
@@ -107,6 +119,14 @@ func RestartInterval(cfg Config) time.Duration {
 		return time.Duration(cfg.Restart.Interval) * time.Second
 	}
 	return defaultInterval
+}
+
+// StatsRetainDays returns the stats group's retention in days (default 7)
+func StatsRetainDays(cfg Config) int {
+	if cfg.Stats.Enabled() && cfg.Stats.RetainDays > 0 {
+		return cfg.Stats.RetainDays
+	}
+	return 7
 }
 
 // ProbeInterval returns the probe group's idle threshold (configured in seconds)

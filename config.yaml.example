@@ -55,6 +55,18 @@ watchdog:
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 
+# ===== stats config: enabled when enable is true =====
+# per-day token usage accounting for /v1/chat/completions: one JSON file per day (YYYY-MM-DD.json)
+# in savePath with the day's cumulative counters (requests/input/input_cache/output/total).
+# Streaming requests get stream_options.include_usage force-injected so the usage is always
+# reported (the client receives one extra standard usage chunk at the end of the stream)
+stats:
+  enable: false
+  # directory the daily stats JSON files are saved to; empty disables the policy
+  savePath: ""
+  # how many days of stats files are kept, older ones are deleted; default 7
+  retainDays: 7
+
 # ===== debug config: enabled when enable is true =====
 # a manual trigger: requesting the endpoint runs the command synchronously and returns the result
 # (GET/POST /debug/command). No authentication - keep it reachable only from trusted networks

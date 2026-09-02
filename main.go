@@ -94,6 +94,11 @@ func main() {
 	} else {
 		log.Print("[config] request disabled")
 	}
+	if cfg.Stats.Enabled() {
+		log.Printf("[config] stats enabled: savePath=%s retainDays=%d", cfg.Stats.SavePath, config.StatsRetainDays(cfg))
+	} else {
+		log.Print("[config] stats disabled")
+	}
 	if cfg.Debug.Enabled() {
 		d := cfg.Debug
 		if d.Path == "" {
