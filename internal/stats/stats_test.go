@@ -393,7 +393,7 @@ func TestHandleServesPageAndData(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("page content type = %q", ct)
 	}
-	if !strings.Contains(w.Body.String(), "llama-supervisor") || !strings.Contains(w.Body.String(), "/stats/data") {
+	if !strings.Contains(w.Body.String(), "Tokens") || !strings.Contains(w.Body.String(), "/stats/data") {
 		t.Fatalf("page content unexpected: %q", w.Body.String())
 	}
 

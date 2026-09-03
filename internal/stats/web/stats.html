@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>llama-supervisor stats</title>
+<title>stats</title>
 <link rel="icon" href="data:,">
 <style>
   :root {
@@ -14,7 +14,6 @@
     --axis-text: #6b7280;
   }
   body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem auto; max-width: 1280px; background: #fff; color: #111; text-align: center; }
-  h1 { font-size: 1.2rem; font-weight: 600; color: #111; }
   button { padding: .3rem .9rem; background: #fff; border: 1px solid #d0d5dd; color: #344054; border-radius: 8px; font-size: .9rem; cursor: pointer; }
   button:hover { background: #f2f4f7; }
   .err { color: #c00; }
@@ -55,15 +54,24 @@
   .tt-label { color: #6b7280; flex: 1; text-align: left; }
   .tt-val { font-weight: 700; color: #111; font-variant-numeric: tabular-nums; text-align: right; }
 
-  table { border-collapse: collapse; width: 100%; max-width: 1200px; margin: 0 auto; }
-  th, td { padding: .45rem .8rem; border-bottom: 1px solid #e8eaf0; text-align: right; font-variant-numeric: tabular-nums; color: #111; }
+  .table-wrap { max-width: 1200px; margin: 0 auto; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: .45rem .8rem; border-bottom: 1px solid #e8eaf0; text-align: right; font-variant-numeric: tabular-nums; color: #111; white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
   th { font-weight: 500; }
   tr.total td { border-top: 1px solid #cfd4da; font-weight: 600; }
+
+  @media (max-width: 640px) {
+    body { margin: 1rem; }
+    .card { padding: 16px 14px 14px; border-radius: 12px; }
+    .chart { height: 180px; margin-left: 40px; }
+    .y-label { left: -40px; width: 32px; font-size: .8rem; }
+    .x-label { font-size: .75rem; }
+    th, td { padding: .35rem .5rem; font-size: .8rem; }
+  }
 </style>
 </head>
 <body>
-<h1>llama-supervisor &mdash; per-day token usage</h1>
 <span id="err" class="err"></span>
 <div class="panel" id="panel" hidden>
   <div class="panel-head"><button onclick="load()">refresh</button></div>
@@ -75,12 +83,14 @@
     </div>
   </div>
 </div>
-<table id="t" hidden>
-<thead>
-<tr><th>date</th><th>requests</th><th>input (k)</th><th>input cache (k)</th><th>output (k)</th><th>total (k)</th><th>cache hit</th></tr>
-</thead>
-<tbody></tbody>
-</table>
+<div class="table-wrap">
+  <table id="t" hidden>
+    <thead>
+      <tr><th>date</th><th>requests</th><th>input (k)</th><th>input cache (k)</th><th>output (k)</th><th>total (k)</th><th>cache hit</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
 <script>
 function k(n) { return (n / 1000).toFixed(2) + "k"; }
 function hit(input, cached) { return input > 0 ? (cached / input * 100).toFixed(2) + "%" : "-"; }
@@ -210,7 +220,7 @@ async function load() {
         "<td>" + k(sum.output) + "</td><td>" + k(sum.total) + "</td>" +
         "<td>" + hit(sum.input, sum.input_cache) + "</td>";
       tb.appendChild(tr);
-      document.getElementById("card-total").textContent = fmtNum(sum.total);
+      document.getElementById("card-total").textContent = k(sum.total);
     }
     document.getElementById("panel").hidden = rows.length === 0;
     document.getElementById("t").hidden = rows.length === 0;
