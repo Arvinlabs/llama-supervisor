@@ -1,27 +1,11 @@
 # llama-supervisor
 
-Go reverse proxy with idle health probing, automatic restart, a speed watchdog, and a request policy. The idle timer keeps resetting while requests are active. `restart`, `probe`, `watchdog`, `stats`, and `debug` are independent features, each toggled by its own `enable` switch; the `request` policy is toggled by `request.enable: true` and holds sub-features (virtual keys, prefix cache), each switched on its own within the group (all disabled means the process only reverse-proxies):
+Go reverse proxy that sits in front of a local llama.cpp server (`host:port` → `backend`) and turns it into an always-on, self-healing OpenAI-compatible service. A local model is one big process: it can hang, degenerate into a repeating output loop, or need a restart after being idle. The supervisor watches for that and takes care of it, while also acting as a small gateway layer for whoever calls the model. Use it for:
 
-- `probe.enable: true`: after being idle for `probe.interval` seconds, the next request triggers a probe of the backend llama server before proxying. If the tail characters keep repeating during streaming, the backend is considered unhealthy, `probe.command` runs, and then the request is proxied.
-- `restart.enable: true`: an independent background check. Timing starts after the first request; as long as requests keep coming the window extends. Once idle for `restart.interval` seconds, `restart.command` runs directly without waiting for a request. After a trigger, timing is paused: no requests means no timing, and a new request restarts the timer.
-- `watchdog.enable: true`: an independent background sampler that polls the backend `/slots` every `watchdog.interval` seconds. If the generation speed stays above `watchdog.maxRate` t/s for `watchdog.times` consecutive samples, the backend is assumed to be stuck in an output loop and `watchdog.command` runs.
-- `request.enable: true` + `request.virtualKeys: [ ... ]`: virtual API keys. When the group is enabled and the list is non-empty, clients must present one of the keys in the OpenAI format (`Authorization: Bearer <key>`, the raw header value and the llama.cpp-style `api_key` query parameter are accepted too); missing or unknown keys are rejected with an OpenAI-format 401 error and never proxied. Accepted requests are re-signed with the global `apiKey`, so the virtual keys never reach the backend.
-- `request.prefixCache: true`: normalize `/v1/chat/completions` request bodies before proxying to maximize the backend prefix cache hit rate — the tools list is sorted by tool name (`function.name` / `custom.name` per the OpenAI spec) and all JSON object keys (including tool parameter schemas) are re-emitted in sorted order, so semantically identical requests produce identical bytes.
-- `stats.enable: true` + `stats.savePath`: per-day token usage accounting for `/v1/chat/completions` only. One JSON file per day (`YYYY-MM-DD.json`) is saved to `stats.savePath` with the day's cumulative counters (`requests` / `input` / `input_cache` / `output` / `total`); files older than `stats.retainDays` days (default 7) are deleted. Streaming requests are transparently upgraded with `stream_options.include_usage` so the usage is always available.
-
-## Features
-
-- Reverse proxy: `host:port` → `backend`
-- Two independent idle timers (probe starts counting from service startup, restart from the first request); every request during counting extends the idle window:
-  - `probe` (enabled with `enable: true`): once idle for `probe.interval`, when the next request arrives a streaming call to the backend `/v1/chat/completions` is made before proxying (the probe uses the server-level ctx, so a user request disconnect does not affect the probe result):
-    - during streaming, `reasoning_content` and `content` are checked independently; if the tail character of either keeps repeating (reaching `probe.repeatLimit`), the probe is aborted early and the llama server is declared unhealthy. A probe failure is also declared unhealthy.
-    - if the content is normal and the cumulative generated characters reach `probe.successLimit`, the backend is declared healthy immediately and the probe ends early, without waiting for `maxTokens` to finish.
-    - unhealthy: run `probe.command`, then proxy when it completes. Healthy: proxy directly.
-  - `restart` (enabled with `enable: true`): an independent background check (once per second). Timing starts from the first request after service startup (no timing before that); every request extends the idle window. Once idle for `restart.interval` (measured from the last request), `restart.command` runs without waiting for a request. After a trigger timing is paused, resumes when a new request arrives, and can repeat periodically.
-- `watchdog` (enabled with `enable: true`): an independent background sampler that polls the backend `/slots` (llama.cpp) every `watchdog.interval` (default 2s). If the generation speed within a sample interval exceeds `watchdog.maxRate` t/s (default 300) for `watchdog.times` consecutive samples (default 2, non-consecutive over-speed samples do not count), the backend is assumed to be stuck in an output loop (e.g. `//////`) and `watchdog.command` runs. The counter is reset when the speed drops back or a sample fails; after a trigger or a `/slots` fetch failure the watchdog fully pauses for `watchdog.pause` seconds (default 30) — no `/slots` fetching at all during the pause — and the first sample after the pause only rebuilds the baseline.
-- After a probe declares unhealthy and the command runs, the backend `/health` is polled every 0.5s until it returns 2xx before forwarding (returns immediately if the probe process exits; a restart trigger does not wait and runs its command directly).
-- Optional startup command (`startupCommand`) run synchronously once at boot.
-- Graceful shutdown on Ctrl+C / SIGTERM.
+- **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, and `watchdog` catches an output loop (speed far above normal) — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
+- **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), and `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens).
+- **knowing what the model costs**: `stats` records per-day token usage (input / input cache / output / total) of `/v1/chat/completions` into one JSON file per day.
+- **seeing and poking what is going on**: `debug` provides a manual command endpoint and dumps inbound/outbound requests to disk.
 
 ## Build & Run
 
@@ -58,12 +42,15 @@ cp config.yaml.example config.yaml
 | `watchdog` | watchdog config object, enabled with `enable: true`, see below |
 | `request` | request policy config object, see below |
 | `stats` | stats policy config object, see below |
-
-### request (virtual keys)
-
-When `request.enable` is true and `request.virtualKeys` is non-empty, all proxied requests must carry one of the configured virtual keys (OpenAI format `Authorization: Bearer <key>`); the supervisor re-signs the outbound request with the global `apiKey` (no `Authorization` header is sent if `apiKey` is empty), and rejects other requests with an OpenAI-format 401 error.
+| `debug` | debug config object, see below |
 
 ### probe
+
+Idle health probe. Timing starts at service startup and every request extends the idle window; once idle for `probe.interval` seconds, the next request first triggers a probe (a streaming `/v1/chat/completions` call to the backend, using the server-level ctx so a user disconnect does not affect it) before proxying:
+
+- during streaming, `reasoning_content` and `content` are checked independently; if the tail character of either repeats `probe.repeatLimit` times, the probe is aborted early and the backend is declared unhealthy (a probe failure is also unhealthy).
+- if the content is normal and reaches `probe.successLimit` cumulative characters, the backend is declared healthy early, without waiting for generation to finish.
+- unhealthy: run `probe.command`, then poll the backend `/health` every 0.5s until it returns 2xx before forwarding. Healthy: proxy directly.
 
 | Field | Description |
 |---|---|
@@ -79,6 +66,8 @@ When `request.enable` is true and `request.virtualKeys` is non-empty, all proxie
 
 ### restart
 
+Idle restart. An independent background check (once per second): timing starts after the first request, every request extends the idle window, and once idle for `restart.interval` seconds the command runs directly, without waiting for a request. After a trigger timing pauses (no requests means no timing), a new request resumes it, and it can repeat periodically.
+
 | Field | Description |
 |---|---|
 | `restart.enable` | whether enabled, default `false` |
@@ -86,6 +75,8 @@ When `request.enable` is true and `request.virtualKeys` is non-empty, all proxie
 | `restart.command` | shell command run on idle timeout, e.g. restarting llama |
 
 ### watchdog
+
+Speed watchdog. An independent background sampler polls the backend `/slots` every `watchdog.interval` seconds; if the average generation speed within a sample interval exceeds `watchdog.maxRate` t/s for `watchdog.times` consecutive samples (non-consecutive over-speed samples do not count), the backend is assumed to be stuck in an output loop (e.g. `//////`) and `watchdog.command` runs. The counter resets when the speed drops back or a sample fails; after a trigger or a `/slots` fetch failure the watchdog fully pauses for `watchdog.pause` seconds (no `/slots` fetching at all during the pause), and the first sample after the pause only rebuilds the baseline.
 
 | Field | Description |
 |---|---|
@@ -97,22 +88,17 @@ When `request.enable` is true and `request.virtualKeys` is non-empty, all proxie
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |
 
-### debug
-
-| Field | Description |
-|---|---|
-| `debug.enable` | whether enabled, default `false` |
-| `debug.path` | endpoint path, default `/debug/command`; GET/POST runs the command synchronously and returns the result |
-| `debug.command` | shell command run on request |
-| `debug.savePath` | when debug is enabled, every inbound proxied request is dumped to this directory as a plain text file named by the request time (`YYYYMMDD_HHMMSS.mmm.txt`, full request line + headers + body, generated from exactly what the client sent; JSON bodies are stored pretty-printed, non-JSON bodies base64-encoded so the dump stays plain text); default empty (saving disabled) |
-| `debug.outSavePath` | when debug is enabled, every outbound proxied request is dumped to this directory after the request policy has rewritten it (when `request.enable` is true), using the same plain text format as `debug.savePath`; default empty (saving disabled) |
-
 ### request
+
+Request policy with two independent sub-features (each only takes effect when `request.enable` is true):
+
+- `virtualKeys`: when the list is non-empty, clients must present one of the keys in the OpenAI format (`Authorization: Bearer <key>`; the raw header value and the llama.cpp-style `api_key` query parameter are accepted too); missing or unknown keys are rejected with an OpenAI-format 401 error and never proxied. Accepted requests are re-signed with the global `apiKey` (no `Authorization` header is sent if `apiKey` is empty), so the virtual keys never reach the backend.
+- `prefixCache`: normalizes `/v1/chat/completions` request bodies so that semantically identical requests produce identical bytes, maximizing the backend prefix cache hit rate.
 
 | Field | Description |
 |---|---|
 | `request.enable` | whether the request policy is enabled, default `false`; sub-features only take effect when it is true |
-| `request.virtualKeys` | virtual API key list, default empty (sub-feature off). When non-empty, proxied requests must carry one of the keys in the OpenAI format (`Authorization: Bearer <key>`; the raw header value and the `api_key` query parameter are also accepted); missing or unknown keys are rejected with an OpenAI-format 401 error. Accepted requests are re-signed with the global `apiKey`, which never sees the virtual keys |
+| `request.virtualKeys` | virtual API key list, default empty (sub-feature off). When non-empty, proxied requests must carry one of the keys; missing or unknown keys are rejected with an OpenAI-format 401 error. Accepted requests are re-signed with the global `apiKey`, which never sees the virtual keys |
 | `request.prefixCache` | prefix cache, default `false`. When enabled, `/v1/chat/completions` request bodies are normalized before proxying: only the top-level `tools` list is touched — sorted by tool name (`function.name` / `custom.name` per the OpenAI spec, canonical-byte tiebreak), and every element is re-encoded in canonical form (object keys sorted at all levels, numbers in shortest form `1.0` -> `1`, no HTML escaping), so semantically identical tools lists in any key order / number literal / whitespace yield one canonical array; every byte outside the tools array is passed through exactly as the client sent it. A tools array with invalid UTF-8 is passed through unchanged |
 
 ### stats
@@ -137,3 +123,15 @@ The usage comes from the backend response: non-stream responses always carry it;
 | `stats.enable` | whether the stats policy is enabled, default `false` |
 | `stats.savePath` | directory the per-day stats JSON files are saved to; empty disables the policy even when `enable` is true |
 | `stats.retainDays` | how many days of stats files are kept (older ones are deleted), default `7` |
+
+### debug
+
+Manual trigger and request dump. With `debug.enable` true, requesting `debug.path` (GET/POST) runs `debug.command` synchronously and returns the result (no authentication — keep it reachable only from trusted networks). The save paths dump proxied requests as plain text files named by the request time (`YYYYMMDD_HHMMSS.mmm.txt`, full request line + headers + body; JSON bodies stored pretty-printed, non-JSON bodies base64-encoded so the dump stays plain text).
+
+| Field | Description |
+|---|---|
+| `debug.enable` | whether enabled, default `false` |
+| `debug.path` | endpoint path, default `/debug/command`; GET/POST runs the command synchronously and returns the result |
+| `debug.command` | shell command run on request |
+| `debug.savePath` | when debug is enabled, every inbound proxied request is dumped to this directory, generated from exactly what the client sent; default empty (saving disabled) |
+| `debug.outSavePath` | when debug is enabled, every outbound proxied request is dumped to this directory after the request policy has rewritten it (when `request.enable` is true), using the same plain text format as `debug.savePath`; default empty (saving disabled) |
