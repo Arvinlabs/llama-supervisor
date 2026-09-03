@@ -144,6 +144,13 @@ func (p *Supervisor) HandleDebug(w http.ResponseWriter, r *http.Request) bool {
 	return p.debug != nil && p.debug.Handle(w, r)
 }
 
+// HandleStats reports whether the request was the stats page (/stats) or its data
+// (/stats/data) and, if so, serves it; both are served by the supervisor itself
+// and never proxied
+func (p *Supervisor) HandleStats(w http.ResponseWriter, r *http.Request) bool {
+	return p.stats != nil && p.stats.Handle(w, r)
+}
+
 // statusRecorder wraps ResponseWriter to record the response status code for the access log
 type statusRecorder struct {
 	http.ResponseWriter

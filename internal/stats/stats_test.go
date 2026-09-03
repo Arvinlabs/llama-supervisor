@@ -358,6 +358,84 @@ func TestParseUsageTotalFallback(t *testing.T) {
 	}
 }
 
+// Handle serves the embedded page on /stats and the JSON data on /stats/data
+func TestHandleServesPageAndData(t *testing.T) {
+	p := newTestPolicy(t, 30)
+	p.record(Usage{Prompt: 27, Cached: 23, Completion: 240, Total: 267})
+
+	// the data endpoint
+	w := httptest.NewRecorder()
+	if !p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/data", nil)) {
+		t.Fatal("/stats/data must be handled")
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("data content type = %q", ct)
+	}
+	var resp struct {
+		Days []dayStats `json:"days"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Days) != 1 {
+		t.Fatalf("want 1 day, got %d: %s", len(resp.Days), w.Body.String())
+	}
+	d := resp.Days[0]
+	if d.Date != time.Now().Format(dateLayout) || d.Requests != 1 || d.Input != 27 || d.InputCache != 23 || d.Output != 240 || d.Total != 267 {
+		t.Fatalf("unexpected day: %+v", d)
+	}
+
+	// the page endpoint
+	w = httptest.NewRecorder()
+	if !p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats", nil)) {
+		t.Fatal("/stats must be handled")
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("page content type = %q", ct)
+	}
+	if !strings.Contains(w.Body.String(), "llama-supervisor") || !strings.Contains(w.Body.String(), "/stats/data") {
+		t.Fatalf("page content unexpected: %q", w.Body.String())
+	}
+
+	// the page must not trigger a favicon request from the browser
+	if !strings.Contains(w.Body.String(), `<link rel="icon" href="data:,">`) {
+		t.Fatalf("page must carry an inline icon: %q", w.Body.String())
+	}
+
+	// any other path is left untouched (to be proxied)
+	if p.Handle(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://s/other", nil)) {
+		t.Fatal("other paths must not be handled")
+	}
+}
+
+// Days returns the parsed day files newest first and skips non-day files
+func TestDaysNewestFirst(t *testing.T) {
+	p := newTestPolicy(t, 30)
+	for _, off := range []int{-3, -1, 0} {
+		date := time.Now().AddDate(0, 0, off).Format(dateLayout)
+		d := dayStats{Date: date, Requests: 1, Input: 100, InputCache: 40, Output: 200, Total: 300}
+		data, _ := json.Marshal(&d)
+		if err := os.WriteFile(filepath.Join(p.savePath, date+".json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(p.savePath, "junk.json"), []byte(`{"date":"not-a-date"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	days, err := p.Days()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(days) != 3 {
+		t.Fatalf("want 3 days, got %d", len(days))
+	}
+	for i := 1; i < len(days); i++ {
+		if days[i-1].Date <= days[i].Date {
+			t.Fatalf("days not sorted newest first: %v", days)
+		}
+	}
+}
+
 // splitReader reads at most n bytes per Read (forces line-splitting) and records Close
 type splitReader struct {
 	r      *strings.Reader

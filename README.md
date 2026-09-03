@@ -118,6 +118,8 @@ Per-day token usage accounting, only for `/v1/chat/completions` (all other endpo
 
 The usage comes from the backend response: non-stream responses always carry it; for streams the supervisor force-injects `stream_options.include_usage` into the outbound request (a standard, client-visible extra usage chunk at the end of the stream), so the final usage chunk is always present. The response bytes pass through to the client unmodified and unbuffered. If a stream ends abnormally before the usage chunk, that request is simply not counted. Day files older than `stats.retainDays` days are deleted at startup and at most once a day (by the first recorded request after a date change).
 
+The supervisor also serves an embedded web page at `/stats` (its JSON data at `/stats/data`): a per-day vertical stacked bar chart (one bar per day, height = total, split into input cache / input / output) above a per-day table with tokens in `k` units (e.g. `1.32k`) and the cache hit rate (`input_cache` / `input`, 2 decimal places), plus an all-days total row. The endpoints are served by the supervisor itself and never proxied.
+
 | Field | Description |
 |---|---|
 | `stats.enable` | whether the stats policy is enabled, default `false` |

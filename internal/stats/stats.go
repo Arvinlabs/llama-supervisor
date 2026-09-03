@@ -2,12 +2,15 @@ package stats
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +21,9 @@ import (
 
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
 )
+
+//go:embed web/stats.html
+var pageHTML []byte
 
 // CompletionsPath is the only proxied endpoint the stats policy accounts for:
 // the OpenAI-compatible chat completion endpoint
@@ -252,6 +258,58 @@ func (p *Policy) record(u Usage) {
 	}
 	if p.lastPurge != date { // at most one directory scan per day
 		p.purge()
+	}
+}
+
+// Days returns all parsed per-day stats, newest day first
+func (p *Policy) Days() ([]dayStats, error) {
+	entries, err := os.ReadDir(p.savePath)
+	if err != nil {
+		return nil, err
+	}
+	var days []dayStats
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if _, err := time.Parse(dateLayout, name); err != nil {
+			continue // not a day file
+		}
+		data, err := os.ReadFile(filepath.Join(p.savePath, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var d dayStats
+		if err := json.Unmarshal(data, &d); err != nil {
+			return nil, fmt.Errorf("%s: %v", e.Name(), err)
+		}
+		days = append(days, d)
+	}
+	sort.Slice(days, func(i, j int) bool { return days[i].Date > days[j].Date })
+	return days, nil
+}
+
+// Handle serves the embedded stats page on /stats and its JSON data on
+// /stats/data; it reports whether the request was one of them (otherwise the
+// request is left untouched to be proxied)
+func (p *Policy) Handle(w http.ResponseWriter, r *http.Request) bool {
+	switch r.URL.Path {
+	case "/stats", "/stats/":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(pageHTML)
+		return true
+	case "/stats/data":
+		days, err := p.Days()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string][]dayStats{"days": days})
+		return true
+	default:
+		return false
 	}
 }
 
