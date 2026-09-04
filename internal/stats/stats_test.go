@@ -234,6 +234,38 @@ func TestRecordMergesSameDay(t *testing.T) {
 	}
 }
 
+// records are also accumulated into the current hour-of-day bucket
+func TestRecordTracksHour(t *testing.T) {
+	p := newTestPolicy(t, 30)
+	p.record(Usage{Prompt: 27, Cached: 23, Completion: 240, Total: 267})
+	p.record(Usage{Prompt: 10, Cached: 4, Completion: 20, Total: 30})
+	d := readDay(t, todayFile(t, p))
+	wantHour := time.Now().Hour()
+	if len(d.Hours) != 1 {
+		t.Fatalf("want 1 hour bucket, got %d: %+v", len(d.Hours), d.Hours)
+	}
+	h, ok := d.Hours[wantHour]
+	if !ok {
+		t.Fatalf("missing bucket for hour %d: %+v", wantHour, d.Hours)
+	}
+	if h.Requests != 2 || h.Input != 37 || h.InputCache != 27 || h.Output != 260 || h.Total != 297 {
+		t.Fatalf("hour stats not merged: %+v", h)
+	}
+	// the hour buckets must agree with the day totals
+	var sum hourStats
+	for _, v := range d.Hours {
+		sum.Requests += v.Requests
+		sum.Input += v.Input
+		sum.InputCache += v.InputCache
+		sum.Output += v.Output
+		sum.Total += v.Total
+	}
+	wantSum := hourStats{Requests: d.Requests, Input: d.Input, InputCache: d.InputCache, Output: d.Output, Total: d.Total}
+	if sum != wantSum {
+		t.Fatalf("hour buckets %v do not sum to day totals %+v", sum, d)
+	}
+}
+
 // a stream without any usage chunk (e.g. interrupted before the final chunk) records nothing
 func TestStreamWithoutUsageRecordsNothing(t *testing.T) {
 	p := newTestPolicy(t, 30)

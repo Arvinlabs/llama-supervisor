@@ -42,15 +42,26 @@ type Usage struct {
 	Total      int // prompt + completion
 }
 
+// hourStats holds one hour-of-day's cumulative token counters within a day
+type hourStats struct {
+	Requests   int `json:"requests"`
+	Input      int `json:"input"`
+	InputCache int `json:"input_cache"`
+	Output     int `json:"output"`
+	Total      int `json:"total"`
+}
+
 // dayStats is the per-day stats document: one JSON file per day in the save
-// path, named YYYY-MM-DD.json, holding the day's cumulative token counters
+// path, named YYYY-MM-DD.json, holding the day's cumulative token counters and
+// a per-hour breakdown (keyed by hour-of-day 0-23) for the same day
 type dayStats struct {
-	Date       string `json:"date"`
-	Requests   int    `json:"requests"`
-	Input      int    `json:"input"`
-	InputCache int    `json:"input_cache"`
-	Output     int    `json:"output"`
-	Total      int    `json:"total"`
+	Date       string            `json:"date"`
+	Requests   int               `json:"requests"`
+	Input      int               `json:"input"`
+	InputCache int               `json:"input_cache"`
+	Output     int               `json:"output"`
+	Total      int               `json:"total"`
+	Hours      map[int]hourStats `json:"hours,omitempty"`
 }
 
 // Policy accounts the token usage of every /v1/chat/completions request into
@@ -244,6 +255,19 @@ func (p *Policy) record(u Usage) {
 	d.InputCache += u.Cached
 	d.Output += u.Completion
 	d.Total += u.Total
+
+	// accumulate the same counters into this hour-of-day bucket
+	hour := time.Now().Hour()
+	if d.Hours == nil {
+		d.Hours = make(map[int]hourStats)
+	}
+	h := d.Hours[hour]
+	h.Requests++
+	h.Input += u.Prompt
+	h.InputCache += u.Cached
+	h.Output += u.Completion
+	h.Total += u.Total
+	d.Hours[hour] = h
 
 	data, err := json.MarshalIndent(&d, "", "  ")
 	if err == nil {
