@@ -453,6 +453,11 @@
             const d = new Date(date + "T00:00:00");
             return (d.getMonth() + 1) + "/" + d.getDate();
         }
+        // localDate is today's date (YYYY-MM-DD) in the viewer's local time
+        function localDate() {
+            const d = new Date();
+            return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+        }
 
         // hourRows expands a day's per-hour buckets into a fixed 24-slot series (0-23)
         function hourRows(day) {
@@ -489,9 +494,9 @@
                     x => x.date,
                     (x, i) => ticks.includes(i) ? mdLabel(x.date) : null);
 
-                // per-hour chart for the newest day that carries hour data
+                // per-hour chart for today only (hidden when today has no data)
                 const hourCard = document.getElementById("hour-card");
-                const hourDay = rows.find(x => x.hours && Object.keys(x.hours).length);
+                const hourDay = rows.find(x => x.date === localDate() && x.hours && Object.keys(x.hours).length);
                 if (hourDay) {
                     const hrows = hourRows(hourDay);
                     document.getElementById("hour-title").textContent = "Today";
