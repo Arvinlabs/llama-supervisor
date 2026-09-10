@@ -46,7 +46,14 @@ type WatchdogGroup struct {
 	Times    int     `yaml:"times"`    // consecutive over-speed samples required to declare unhealthy, default 2
 	Pause    int     `yaml:"pause"`    // seconds the watchdog fully pauses (no fetching) after a trigger or a /slots fetch failure, default 90
 	Verbose  bool    `yaml:"verbose"`  // whether to log the measured speed on normal windows, default false
-	Command  string  `yaml:"command"`  // shell command run after declaring unhealthy
+	// MinDraftRate minimum MTP draft acceptance ratio (timings.draft_n_accepted / timings.draft_n)
+	// observed per chat completion; a completion below it for draftTimes in a row is declared
+	// unhealthy and runs command. Sampled from every completion the proxy observes (not /slots).
+	// 0 (default) disables this check
+	MinDraftRate float64 `yaml:"minDraftRate"`
+	// DraftTimes consecutive low draft-acceptance completions required to declare unhealthy, default 10
+	DraftTimes int    `yaml:"draftTimes"`
+	Command    string `yaml:"command"` // shell command run after declaring unhealthy
 }
 
 func (g *WatchdogGroup) Enabled() bool {

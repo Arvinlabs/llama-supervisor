@@ -12,6 +12,7 @@ import (
 
 	"github.com/Arvinlabs/llama-supervisor/internal/command"
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
+	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 )
 
 // watchdogConfig effective watchdog parameters (defaults filled in)
@@ -22,17 +23,28 @@ type Config struct {
 	Pause    time.Duration // how long to fully pause (no fetching) after a trigger or a /slots fetch failure, default 30s
 	Command  string        // shell command run after declaring unhealthy
 	Verbose  bool          // whether to log the measured speed on normal windows, default false
+
+	// MinDraftRate is the minimum MTP draft acceptance ratio (timings.draft_n_accepted /
+	// timings.draft_n) observed per chat completion; a completion below it for DraftTimes in
+	// a row declares the backend unhealthy. It is a push signal (sampled from the observed
+	// completions, not /slots) and is disabled when <= 0 (the default)
+	MinDraftRate float64
+	// DraftTimes is the number of consecutive low draft-acceptance completions required to
+	// declare unhealthy, default 10
+	DraftTimes int
 }
 
 // BuildWatchdogConfig builds the effective parameters from the watchdog config group (filling in defaults)
 func BuildWatchdogConfig(g *config.WatchdogGroup) Config {
 	wc := Config{
-		Interval: 2 * time.Second,
-		MaxRate:  300,
-		Times:    2,
-		Pause:    30 * time.Second,
-		Command:  g.Command,
-		Verbose:  g.Verbose,
+		Interval:     2 * time.Second,
+		MaxRate:      300,
+		Times:        2,
+		Pause:        30 * time.Second,
+		Command:      g.Command,
+		Verbose:      g.Verbose,
+		MinDraftRate: g.MinDraftRate, // 0 (unset) disables the draft-acceptance check
+		DraftTimes:   10,
 	}
 	if g.Interval > 0 {
 		wc.Interval = time.Duration(g.Interval) * time.Second
@@ -45,6 +57,9 @@ func BuildWatchdogConfig(g *config.WatchdogGroup) Config {
 	}
 	if g.Pause > 0 {
 		wc.Pause = time.Duration(g.Pause) * time.Second
+	}
+	if g.DraftTimes > 0 {
+		wc.DraftTimes = g.DraftTimes
 	}
 	return wc
 }
@@ -69,15 +84,16 @@ func decideFast(prev, cur watchdogState, elapsed time.Duration, maxRate float64)
 // restart); after a trigger or a /slots fetch failure the watchdog fully pauses (no fetching at
 // all) for pause seconds
 type Policy struct {
-	mu         sync.Mutex
-	config     Config
-	backend    string
-	apiKey     string // Bearer API key sent when sampling /slots (none when empty)
-	prev       watchdogState
-	wedges     int
-	pauseUntil time.Time // fully paused (no fetching) before this moment
-	skipNext   bool      // after a pause the first sample only rebuilds the baseline (no rate check)
-	lastFail   string    // last fetch error message; only logged when it changes
+	mu          sync.Mutex
+	config      Config
+	backend     string
+	apiKey      string // Bearer API key sent when sampling /slots (none when empty)
+	prev        watchdogState
+	wedges      int       // consecutive over-speed /slots samples
+	draftWedges int       // consecutive low draft-acceptance completions
+	pauseUntil  time.Time // fully paused (no fetching) before this moment
+	skipNext    bool      // after a pause the first sample only rebuilds the baseline (no rate check)
+	lastFail    string    // last fetch error message; only logged when it changes
 }
 
 // newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey
@@ -175,6 +191,58 @@ func (w *Policy) Tick(ctx context.Context) {
 		return
 	}
 	command.RunCommand(ctx, "watchdog", w.config.Command)
+}
+
+// OnCompletion feeds one observed chat completion into the MTP draft-acceptance
+// monitor; it implements observe.Consumer. No-op when the check is disabled
+// (MinDraftRate <= 0) or the observation carries no draft data. It shares the
+// watchdog's pause with the over-speed monitor: a trigger of either fully pauses
+// the watchdog (no /slots fetching).
+func (w *Policy) OnCompletion(o observe.Observation) {
+	if w.config.MinDraftRate <= 0 || !o.HasDraft() {
+		return
+	}
+	w.observeDraft(o.DraftRate())
+}
+
+// observeDraft tracks consecutive low draft-acceptance samples. When the streak
+// reaches the threshold it declares the backend unhealthy and runs the command
+// (like the over-speed trigger), then fully pauses. The command runs in a
+// goroutine: OnCompletion runs on the proxy's per-request stream-copy path and
+// must not block the client.
+func (w *Policy) observeDraft(rate float64) {
+	w.mu.Lock()
+	if time.Now().Before(w.pauseUntil) { // fully paused: no bookkeeping
+		w.mu.Unlock()
+		return
+	}
+	if rate < w.config.MinDraftRate {
+		w.draftWedges++
+	} else {
+		w.draftWedges = 0
+	}
+	triggered := w.draftWedges >= w.config.DraftTimes
+	below := w.draftWedges
+	if triggered {
+		w.draftWedges = 0
+		w.pauseUntil = time.Now().Add(w.config.Pause)
+		w.skipNext = true
+	}
+	w.mu.Unlock()
+	if !triggered {
+		if w.config.Verbose {
+			log.Printf("[watchdog] ok: draft acceptance %.3f >= min %.3f (%d/%d below)", rate, w.config.MinDraftRate, below, w.config.DraftTimes)
+		}
+		return
+	}
+	log.Printf("[watchdog] low draft acceptance: %.3f < min %.3f for %d completions in a row, restarting backend",
+		rate, w.config.MinDraftRate, w.config.DraftTimes)
+	log.Printf("[watchdog] fully paused for %s after trigger", w.config.Pause)
+	if w.config.Command == "" {
+		log.Print("[watchdog] no command configured, skip")
+		return
+	}
+	go command.RunCommand(context.Background(), "watchdog", w.config.Command)
 }
 
 // slotNextToken is a field of slot next_token[] elements in the /slots response (llama.cpp)

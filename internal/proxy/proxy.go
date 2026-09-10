@@ -13,6 +13,7 @@ import (
 
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
 	"github.com/Arvinlabs/llama-supervisor/internal/debug"
+	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 	"github.com/Arvinlabs/llama-supervisor/internal/probe"
 	"github.com/Arvinlabs/llama-supervisor/internal/request"
 	"github.com/Arvinlabs/llama-supervisor/internal/restart"
@@ -26,11 +27,14 @@ type Supervisor struct {
 	backendURL  string
 	backendAddr string // backend host:port (validated at startup, must carry an explicit port)
 
+	hub     *observe.Hub // completion observation hub; stats and watchdog subscribe to it
+	observe bool         // whether the completion tap is active (at least one consumer is registered)
+
 	restart  *restart.Policy  // restart policy (nil when restart is disabled)
 	probe    *probe.Policy    // probe policy (nil when probe is disabled)
 	watchdog *watchdog.Policy // watchdog policy (nil when watchdog is disabled)
 	request  *request.Policy  // request policy (nil when no request sub-feature is enabled)
-	stats    *stats.Policy    // stats policy (nil when stats is disabled); accounts /v1/chat/completions token usage per day
+	stats    *stats.Policy    // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
 	debug    *debug.Policy    // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
 }
 
@@ -46,30 +50,29 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	p := &Supervisor{
 		backendURL:  cfg.Backend,
 		backendAddr: backend.Host,
+		hub:         &observe.Hub{},
 	}
-	var rp *httputil.ReverseProxy
 	if cfg.Request.Enabled() {
 		p.request = request.New(cfg.Request, cfg.ApiKey)
 	}
 	if cfg.Stats.Enabled() {
 		p.stats = stats.New(cfg.Stats)
+		p.hub.Register(p.stats)
 	}
-	if p.request != nil || p.stats != nil {
-		// with a request or stats policy use the Rewrite API (Director has no request hook):
-		// SetURL routes to the backend, then the policy modifiers run on the outbound request
-		rp = &httputil.ReverseProxy{
-			Rewrite: func(pr *httputil.ProxyRequest) {
-				pr.SetURL(backend)
-				if p.request != nil {
-					p.request.ModifyRequest(pr.Out)
-				}
-				if p.stats != nil {
-					p.stats.ModifyRequest(pr.Out)
-				}
-			},
-		}
-	} else {
-		rp = httputil.NewSingleHostReverseProxy(backend)
+	// the completion tap is always wired via the Rewrite API (Director has no request hook):
+	// SetURL routes to the backend, the request policy rewrites it, then injectUsage forces
+	// stream_options.include_usage so the backend always reports usage (and the timings that
+	// carry the MTP draft stats). injectUsage only runs when at least one consumer subscribed
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(backend)
+			if p.request != nil {
+				p.request.ModifyRequest(pr.Out)
+			}
+			if p.observe {
+				injectUsage(pr.Out)
+			}
+		},
 	}
 	if cfg.Debug.Enabled() {
 		p.debug = debug.New(cfg.Debug)
@@ -93,10 +96,15 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		} else {
 			res.Body = cb
 		}
-		// stats: tap the chat completion response body for the token usage (outermost
-		// wrap, so an injected stream error event still flows through the scanner)
-		if p.stats != nil && res.Request.URL.Path == stats.CompletionsPath {
-			res.Body = p.stats.Wrap(res)
+		// completion tap: parse the completion's observation out of the response and fan it
+		// out to the consumers (outermost wrap, so an injected stream error event still
+		// flows through the scanner); active whenever at least one consumer is registered
+		if p.observe && res.Body != nil && res.Request.URL.Path == completionsPath {
+			res.Body = &completionTap{
+				inner:  res.Body,
+				hub:    p.hub,
+				stream: strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream"),
+			}
 		}
 		cb.watch()
 		return nil
@@ -121,7 +129,10 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	}
 	if cfg.Watchdog.Enabled() {
 		p.watchdog = watchdog.New(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
+		p.hub.Register(p.watchdog)
 	}
+	// the completion tap is active whenever any consumer (stats or watchdog) subscribed
+	p.observe = p.hub.Len() > 0
 	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.stats == nil && p.debug == nil {
 		log.Print("[config] restart, probe, watchdog, request, stats and debug all disabled, proxying only")
 	}
@@ -292,16 +303,12 @@ func (p *Supervisor) StartBackground(ctx context.Context) {
 	}
 }
 
-// streamErrorPath is the only proxied path eligible for the injected SSE error event:
-// the OpenAI-compatible chat completion endpoint
-const streamErrorPath = "/v1/chat/completions"
-
 // shouldInjectStreamError reports whether the response is an SSE chat completion stream
 // that can receive the injected error event: the path must be the chat completion endpoint
 // and the response must actually be a stream (stream:false responses are plain JSON, as are
 // all the other endpoints)
 func shouldInjectStreamError(res *http.Response) bool {
-	if res.Request.URL.Path != streamErrorPath {
+	if res.Request.URL.Path != completionsPath {
 		return false
 	}
 	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")

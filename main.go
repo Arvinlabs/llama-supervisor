@@ -76,8 +76,12 @@ func main() {
 	}
 	if cfg.Watchdog.Enabled() {
 		wc := watchdog.BuildWatchdogConfig(cfg.Watchdog)
-		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d pause=%ds",
-			int(wc.Interval.Seconds()), wc.MaxRate, wc.Times, int(wc.Pause.Seconds()))
+		draft := "off"
+		if wc.MinDraftRate > 0 {
+			draft = fmt.Sprintf("%.3f/%d", wc.MinDraftRate, wc.DraftTimes)
+		}
+		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d pause=%ds minDraftRate=%s",
+			int(wc.Interval.Seconds()), wc.MaxRate, wc.Times, int(wc.Pause.Seconds()), draft)
 		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
 	} else {
 		log.Print("[config] watchdog disabled")

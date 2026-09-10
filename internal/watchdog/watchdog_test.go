@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
+	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 )
 
 func TestDecideFast(t *testing.T) {
@@ -272,5 +273,84 @@ func TestBuildWatchdogConfigOverrides(t *testing.T) {
 	wc := BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, Interval: 5, MaxRate: 500, Times: 3, Pause: 30, Command: "cmd", Verbose: true})
 	if wc.Interval != 5*time.Second || wc.MaxRate != 500 || wc.Times != 3 || wc.Pause != 30*time.Second || wc.Command != "cmd" || !wc.Verbose {
 		t.Fatalf("unexpected overrides: %+v", wc)
+	}
+}
+
+// draftObs builds an observation with the given draft acceptance counters
+func draftObs(accepted, n int) observe.Observation {
+	return observe.Observation{DraftN: n, DraftAccepted: accepted}
+}
+
+// N consecutive completions below minDraftRate trigger (entering a full pause)
+func TestObserveDraftTriggers(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
+	p.OnCompletion(draftObs(40, 100)) // 0.40 < 0.5, low 1/2
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("a single low sample should not trigger")
+	}
+	p.OnCompletion(draftObs(30, 100)) // 0.30 < 0.5, low 2/2 -> trigger
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected a pause window after two consecutive low samples")
+	}
+}
+
+// an accepted sample at/above the threshold resets the streak
+func TestObserveDraftResets(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
+	p.OnCompletion(draftObs(40, 100)) // low 1/2
+	p.OnCompletion(draftObs(90, 100)) // 0.90 >= 0.5, streak reset
+	p.OnCompletion(draftObs(40, 100)) // low 1/2 again
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("a recovered streak must not trigger")
+	}
+}
+
+// acceptance exactly at the threshold is not "below" (>= is ok), so it never counts
+func TestObserveDraftAtThreshold(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
+	p.OnCompletion(draftObs(50, 100)) // 0.50 == 0.5, not below
+	p.OnCompletion(draftObs(50, 100))
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("at-threshold acceptance must not count as low")
+	}
+}
+
+// a disabled check (minDraftRate <= 0) and a no-draft observation are both ignored
+func TestObserveDraftIgnored(t *testing.T) {
+	disabled := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
+	disabled.OnCompletion(draftObs(1, 100)) // very low, but the check is disabled
+	if time.Now().Before(disabled.pauseUntil) {
+		t.Fatal("a disabled check must not trigger")
+	}
+	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
+	p.OnCompletion(observe.Observation{Prompt: 10, Completion: 20, Total: 30}) // no draft data
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("a no-draft observation must not trigger the draft check")
+	}
+}
+
+// while paused the draft check does no bookkeeping and cannot extend the pause window
+func TestObserveDraftWhilePaused(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 1, Command: ""}, "http://127.0.0.1:1", "")
+	p.OnCompletion(draftObs(10, 100)) // low 1/1 -> trigger + pause
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected a pause window after the trigger")
+	}
+	until := p.pauseUntil
+	p.OnCompletion(draftObs(10, 100)) // still paused: ignored
+	if !p.pauseUntil.Equal(until) {
+		t.Fatal("an in-pause observation must not extend the pause window")
+	}
+}
+
+// BuildWatchdogConfig defaults and overrides for the draft check
+func TestBuildWatchdogConfigDraft(t *testing.T) {
+	wc := BuildWatchdogConfig(&config.WatchdogGroup{Enable: true})
+	if wc.MinDraftRate != 0 || wc.DraftTimes != 10 {
+		t.Fatalf("unexpected draft defaults: minDraftRate=%v draftTimes=%d", wc.MinDraftRate, wc.DraftTimes)
+	}
+	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.1, DraftTimes: 5})
+	if wc.MinDraftRate != 0.1 || wc.DraftTimes != 5 {
+		t.Fatalf("unexpected draft overrides: minDraftRate=%v draftTimes=%d", wc.MinDraftRate, wc.DraftTimes)
 	}
 }

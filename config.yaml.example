@@ -52,6 +52,12 @@ watchdog:
   pause: 30
   # whether to log the measured speed on normal windows, default false
   verbose: false
+  # min MTP draft acceptance ratio (timings.draft_n_accepted / timings.draft_n) sampled from every
+  # observed chat completion; a completion below it for draftTimes in a row is declared unhealthy
+  # and runs command. 0 (default) disables this check
+  minDraftRate: 0
+  # consecutive low draft-acceptance completions required to declare unhealthy, default 10
+  draftTimes: 10
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 

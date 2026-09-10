@@ -1,0 +1,78 @@
+// Package observe defines the chat-completion observation contract that the
+// proxy publishes and its consumers (stats, watchdog, ...) subscribe to.
+//
+// The proxy always taps every /v1/chat/completions response (streaming and
+// non-streaming) and parses the completion's token/decode statistics out of
+// it. Each parsed Observation is fanned out to every registered Consumer.
+// Parsing and interception live in the proxy; a consumer only reacts to the
+// already-parsed Observation.
+package observe
+
+import "sync"
+
+// Observation is the token and decode statistics one chat completion reports,
+// parsed by the proxy from the response (the final usage chunk for a stream,
+// the JSON body for a non-stream response).
+type Observation struct {
+	Prompt        int // prompt tokens (input)
+	Cached        int // prompt tokens served from the backend prefix cache (input cache)
+	Completion    int // generated tokens (output)
+	Total         int // prompt + completion
+	DraftN        int // MTP/speculative draft tokens attempted (0 when not reported)
+	DraftAccepted int // MTP/speculative draft tokens accepted (0 when not reported)
+}
+
+// HasDraft reports whether the observation carries MTP/speculative draft data.
+func (o Observation) HasDraft() bool { return o.DraftN > 0 }
+
+// DraftRate is the MTP draft acceptance ratio in [0,1]; only meaningful when
+// HasDraft is true.
+func (o Observation) DraftRate() float64 {
+	if o.DraftN <= 0 {
+		return 0
+	}
+	return float64(o.DraftAccepted) / float64(o.DraftN)
+}
+
+// Consumer reacts to one observed chat completion. Implementations must be
+// safe for concurrent use: Observations are delivered from the proxy's per-
+// request response path, so many completions may be observed at once.
+type Consumer interface {
+	OnCompletion(o Observation)
+}
+
+// Hub fans an Observation out to every registered consumer. It is safe for
+// concurrent use.
+type Hub struct {
+	mu        sync.RWMutex
+	consumers []Consumer
+}
+
+// Register adds a consumer; a nil consumer is ignored.
+func (h *Hub) Register(c Consumer) {
+	if c == nil {
+		return
+	}
+	h.mu.Lock()
+	h.consumers = append(h.consumers, c)
+	h.mu.Unlock()
+}
+
+// Len returns the number of registered consumers.
+func (h *Hub) Len() int {
+	h.mu.RLock()
+	n := len(h.consumers)
+	h.mu.RUnlock()
+	return n
+}
+
+// Notify delivers the observation to all registered consumers, in registration
+// order. With no consumers it is a no-op.
+func (h *Hub) Notify(o Observation) {
+	h.mu.RLock()
+	consumers := h.consumers
+	h.mu.RUnlock()
+	for _, c := range consumers {
+		c.OnCompletion(o)
+	}
+}

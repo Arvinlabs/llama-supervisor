@@ -12,10 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
+	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 )
 
 // when the client disconnects mid-stream, the proxied request context toward the backend
@@ -412,5 +414,305 @@ func TestProxySavesOutboundRequestWithoutRequestPolicy(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatalf("outbound dump missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// obsRecorder collects observations delivered by the hub (a test consumer)
+type obsRecorder struct {
+	mu  sync.Mutex
+	obs []observe.Observation
+}
+
+func (r *obsRecorder) OnCompletion(o observe.Observation) {
+	r.mu.Lock()
+	r.obs = append(r.obs, o)
+	r.mu.Unlock()
+}
+
+func (r *obsRecorder) get() []observe.Observation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]observe.Observation(nil), r.obs...)
+}
+
+// splitReader reads at most n bytes per Read (forces line-splitting) and records Close
+type splitReader struct {
+	r      *strings.Reader
+	n      int
+	closed bool
+}
+
+func (s *splitReader) Read(p []byte) (int, error) {
+	if len(p) > s.n {
+		p = p[:s.n]
+	}
+	return s.r.Read(p)
+}
+
+func (s *splitReader) Close() error {
+	s.closed = true
+	return nil
+}
+
+// the streaming completion tap: the usage/timings chunk may be split across reads,
+// every byte is forwarded to the client, and the parsed observation reaches the consumer
+func TestCompletionTapStream(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hi"},"index":0,"finish_reason":null}]}` + "\n\n",
+		`data: {"choices":[],"usage":{"prompt_tokens":27,"completion_tokens":240,"total_tokens":267,"prompt_tokens_details":{"cached_tokens":23}},"timings":{"draft_n":1640,"draft_n_accepted":1270}}` + "\n\n",
+		`data: [DONE]` + "\n\n",
+	}, "")
+	rec := &obsRecorder{}
+	hub := &observe.Hub{}
+	hub.Register(rec)
+	inner := &splitReader{r: strings.NewReader(sse), n: 7}
+	b := &completionTap{inner: inner, hub: hub, stream: true}
+
+	var got bytes.Buffer
+	for {
+		buf := make([]byte, 13)
+		n, err := b.Read(buf)
+		if n > 0 {
+			got.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got.String() != sse {
+		t.Fatalf("stream bytes altered:\n%s\n%s", sse, got.String())
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !inner.closed {
+		t.Fatal("Close not forwarded to the inner body")
+	}
+	obs := rec.get()
+	if len(obs) != 1 {
+		t.Fatalf("want 1 observation, got %d: %+v", len(obs), obs)
+	}
+	o := obs[0]
+	if o.Prompt != 27 || o.Cached != 23 || o.Completion != 240 || o.Total != 267 || o.DraftN != 1640 || o.DraftAccepted != 1270 {
+		t.Fatalf("unexpected observation: %+v", o)
+	}
+}
+
+// the non-stream completion tap: the JSON body is parsed at EOF and delivered
+func TestCompletionTapNonStream(t *testing.T) {
+	body := `{"object":"chat.completion","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"timings":{"draft_n":6,"draft_n_accepted":6}}`
+	rec := &obsRecorder{}
+	hub := &observe.Hub{}
+	hub.Register(rec)
+	inner := &splitReader{r: strings.NewReader(body), n: 4}
+	b := &completionTap{inner: inner, hub: hub, stream: false}
+
+	var got bytes.Buffer
+	for {
+		buf := make([]byte, 9)
+		n, err := b.Read(buf)
+		if n > 0 {
+			got.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got.String() != body {
+		t.Fatalf("body altered:\n%s\n%s", body, got.String())
+	}
+	obs := rec.get()
+	if len(obs) != 1 {
+		t.Fatalf("want 1 observation, got %d: %+v", len(obs), obs)
+	}
+	if obs[0].Prompt != 10 || obs[0].Completion != 5 || obs[0].Total != 15 || obs[0].DraftN != 6 || obs[0].DraftAccepted != 6 {
+		t.Fatalf("unexpected observation: %+v", obs[0])
+	}
+}
+
+// a stream without a usage/timings chunk (e.g. interrupted) delivers nothing
+func TestCompletionTapNoUsage(t *testing.T) {
+	rec := &obsRecorder{}
+	hub := &observe.Hub{}
+	hub.Register(rec)
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+	b := &completionTap{inner: io.NopCloser(strings.NewReader(sse)), hub: hub, stream: true}
+	io.Copy(io.Discard, b)
+	if n := len(rec.get()); n != 0 {
+		t.Fatalf("a usage-less stream must not deliver an observation, got %d: %+v", n, rec.get())
+	}
+}
+
+// total falls back to prompt + completion; timings is a sibling of usage at the top level
+func TestParseObservation(t *testing.T) {
+	o := parseObservation([]byte(`{"usage":{"prompt_tokens":4,"completion_tokens":6},"timings":{"draft_n":100,"draft_n_accepted":90}}`))
+	if o.Total != 10 || o.DraftN != 100 || o.DraftAccepted != 90 {
+		t.Fatalf("unexpected observation: %+v", o)
+	}
+	if o.DraftRate() < 0.9-1e-9 || o.DraftRate() > 0.9+1e-9 {
+		t.Fatalf("draft rate = %v, want 0.9", o.DraftRate())
+	}
+	if parseObservation([]byte(`{"id":"x"}`)) != (observe.Observation{}) {
+		t.Fatal("an empty payload must yield the zero observation")
+	}
+}
+
+// observationFromSSELine edge cases
+func TestObservationFromSSELine(t *testing.T) {
+	line := "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5},\"timings\":{\"draft_n\":4,\"draft_n_accepted\":2}}"
+	if o, ok := observationFromSSELine([]byte(line)); !ok || o.Prompt != 2 || o.Completion != 3 || o.Total != 5 || o.DraftN != 4 || o.DraftAccepted != 2 {
+		t.Fatalf("usage line: ok=%v o=%+v", ok, o)
+	}
+	for _, l := range []string{
+		"data: [DONE]",
+		"data:",
+		"data:   ",
+		": keep-alive",
+		"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}",
+		"",
+	} {
+		if _, ok := observationFromSSELine([]byte(l)); ok {
+			t.Fatalf("line must not yield an observation: %q", l)
+		}
+	}
+}
+
+// newCompletionsRequest builds a POST /v1/chat/completions request with the given body
+func newCompletionsRequest(t *testing.T, body string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "http://backend/v1/chat/completions", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	return r
+}
+
+// a streaming request without usage requested gets stream_options.include_usage injected
+func TestInjectUsageStreaming(t *testing.T) {
+	r := newCompletionsRequest(t, `{"model":"m","stream":true,"messages":[]}`)
+	injectUsage(r)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `"stream_options":{"include_usage":true}`) {
+		t.Fatalf("include_usage not injected: %s", out)
+	}
+	if !strings.Contains(out, `"model":"m"`) || !strings.Contains(out, `"stream":true`) {
+		t.Fatalf("original body fields lost: %s", out)
+	}
+	if r.ContentLength != int64(len(data)) || r.Header.Get("Content-Length") != fmt.Sprint(len(data)) {
+		t.Fatalf("content length not updated: len=%d contentLength=%d header=%s", len(data), r.ContentLength, r.Header.Get("Content-Length"))
+	}
+}
+
+// a request that already asks for usage is passed through byte-identical
+func TestInjectUsageKeepsExisting(t *testing.T) {
+	in := `{"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[]}`
+	r := newCompletionsRequest(t, in)
+	injectUsage(r)
+	data, _ := io.ReadAll(r.Body)
+	if string(data) != in {
+		t.Fatalf("body must be byte-identical:\n%s\n%s", in, data)
+	}
+}
+
+// non-stream, other paths, GETs and non-JSON bodies pass through unchanged
+func TestInjectUsageOnlyEligible(t *testing.T) {
+	stream := `{"model":"m","stream":true,"messages":[]}`
+	cases := map[string]*http.Request{
+		"non-stream": newCompletionsRequest(t, `{"model":"m","stream":false,"messages":[]}`),
+		"other path": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "http://backend/v1/completion", strings.NewReader(stream))
+			r.Header.Set("Content-Type", "application/json")
+			return r
+		}(),
+		"get method": func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "http://backend/v1/chat/completions", nil)
+			r.Header.Set("Content-Type", "application/json")
+			return r
+		}(),
+		"non-json": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, "http://backend/v1/chat/completions", strings.NewReader(stream))
+			r.Header.Set("Content-Type", "text/plain")
+			return r
+		}(),
+	}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			injectUsage(req)
+			if req.Body == nil {
+				return
+			}
+			data, _ := io.ReadAll(req.Body)
+			if strings.Contains(string(data), "include_usage") {
+				t.Fatalf("include_usage injected into a non-eligible request: %s", data)
+			}
+		})
+	}
+}
+
+// end-to-end: the proxy taps a chat completion and fans the parsed observation out to every
+// registered consumer (stats plus a test recorder); the client still gets the stream verbatim
+func TestProxyFansObservationToConsumers(t *testing.T) {
+	dir := t.TempDir()
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hi"},"index":0,"finish_reason":null}]}` + "\n\n",
+		`data: {"choices":[],"usage":{"prompt_tokens":27,"completion_tokens":240,"total_tokens":267,"prompt_tokens_details":{"cached_tokens":23}},"timings":{"draft_n":1640,"draft_n_accepted":1270}}` + "\n\n",
+		`data: [DONE]` + "\n\n",
+	}, "")
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sse))
+	}))
+	defer backend.Close()
+
+	sup := New(config.Config{Backend: backend.URL, Stats: &config.StatsGroup{Enable: true, SavePath: dir}}, context.Background())
+	if !sup.observe {
+		t.Fatal("expected the completion tap to be active with a stats consumer")
+	}
+	rec := &obsRecorder{}
+	sup.hub.Register(rec)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	sup.ServeHTTP(w, r)
+
+	if w.Body.String() != sse {
+		t.Fatalf("client did not receive the stream byte-identical:\n%s\n%s", sse, w.Body.String())
+	}
+	obs := rec.get()
+	if len(obs) != 1 || obs[0].Total != 267 || obs[0].DraftN != 1640 || obs[0].DraftAccepted != 1270 {
+		t.Fatalf("consumer did not receive the observation: %+v", obs)
+	}
+}
+
+// with no consumer registered the tap stays off: the stream is not observed and the
+// streaming request is forwarded without an injected usage option
+func TestProxyTapOffWithoutConsumer(t *testing.T) {
+	var sawIncludeUsage bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		sawIncludeUsage = strings.Contains(string(b), "include_usage")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: x\n\ndata: [DONE]\n\n"))
+	}))
+	defer backend.Close()
+
+	sup := New(config.Config{Backend: backend.URL}, context.Background())
+	if sup.observe {
+		t.Fatal("expected the completion tap to be off with no consumer")
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
+	r.Header.Set("Content-Type", "application/json")
+	sup.ServeHTTP(httptest.NewRecorder(), r)
+	if sawIncludeUsage {
+		t.Fatal("include_usage must not be injected when no consumer observes completions")
 	}
 }
