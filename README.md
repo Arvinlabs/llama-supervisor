@@ -2,7 +2,7 @@
 
 Go reverse proxy that sits in front of a local llama.cpp server (`host:port` → `backend`) and turns it into an always-on, self-healing OpenAI-compatible service. A local model is one big process: it can hang, degenerate into a repeating output loop, or need a restart after being idle. The supervisor watches for that and takes care of it, while also acting as a small gateway layer for whoever calls the model. Use it for:
 
-- **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, and `watchdog` catches an output loop (speed far above normal) — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
+- **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, and `watchdog` catches an output loop (speed far above normal) or a degenerate MTP draft acceptance rate — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
 - **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), and `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens).
 - **knowing what the model costs**: `stats` records per-day token usage (input / input cache / output / total) of `/v1/chat/completions` into one JSON file per day.
 - **seeing and poking what is going on**: `debug` provides a manual command endpoint and dumps inbound/outbound requests to disk.
@@ -78,12 +78,16 @@ Idle restart. An independent background check (once per second): timing starts a
 
 Speed watchdog. An independent background sampler polls the backend `/slots` every `watchdog.interval` seconds; if the average generation speed within a sample interval exceeds `watchdog.maxRate` t/s for `watchdog.times` consecutive samples (non-consecutive over-speed samples do not count), the backend is assumed to be stuck in an output loop (e.g. `//////`) and `watchdog.command` runs. The counter resets when the speed drops back or a sample fails; after a trigger or a `/slots` fetch failure the watchdog fully pauses for `watchdog.pause` seconds (no `/slots` fetching at all during the pause), and the first sample after the pause only rebuilds the baseline.
 
+MTP draft-acceptance watchdog. The supervisor taps every `/v1/chat/completions` response (streaming and non-streaming) and reads the backend's `timings`, which report `draft_n` (speculative/MTP draft tokens attempted) and `draft_n_accepted` (draft tokens accepted); the acceptance ratio is `draft_n_accepted / draft_n`. When `watchdog.minDraftRate` is set (> 0) and the ratio stays below it for `watchdog.draftTimes` consecutive completions (completions without draft data are ignored, so a backend without speculative decoding never trips this), the backend is declared unhealthy and `watchdog.command` runs, and the watchdog fully pauses for `watchdog.pause` seconds. This check shares its pause window with the speed check, and enabling it is what turns the completion tap (and the `stream_options.include_usage` request injection that makes the `timings` present on streams) active. `watchdog.minDraftRate: 0` (the default) turns it off.
+
 | Field | Description |
 |---|---|
 | `watchdog.enable` | whether enabled, default `false` |
 | `watchdog.interval` | `/slots` sampling interval in seconds, default `2` (frequent sampling to detect early) |
 | `watchdog.maxRate` | max generation speed (t/s); the average speed within a sample interval above this counts as one over-speed sample, default `300` |
 | `watchdog.times` | consecutive over-speed samples required to declare unhealthy and run the command (non-consecutive over-speed samples do not count), default `2` |
+| `watchdog.minDraftRate` | min MTP draft acceptance ratio (`timings.draft_n_accepted / timings.draft_n`) sampled from each observed completion; a completion below it for `watchdog.draftTimes` in a row is declared unhealthy and runs the command, default `0` (off) |
+| `watchdog.draftTimes` | consecutive low draft-acceptance completions required to declare unhealthy, default `10` |
 | `watchdog.pause` | seconds the watchdog fully pauses (no `/slots` fetching at all) after a trigger or a `/slots` fetch failure, default `30` |
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |
