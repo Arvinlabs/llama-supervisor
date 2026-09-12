@@ -168,6 +168,50 @@ func TestWatchdogTickRecovers(t *testing.T) {
 	}
 }
 
+// sampling is request-driven: no fetch before any request, the first fetch a fixed
+// firstProbeDelay after the first request arrives, sampling continues across concurrent
+// requests, and it stops once the last request ends
+func TestWatchdogRequestDrivenProbing(t *testing.T) {
+	h := &slotsHandler{}
+	h.processing.Store(true)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := New(&config.WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Command: ""}, srv.URL, "")
+
+	time.Sleep(300 * time.Millisecond)
+	if got := h.reqs.Load(); got != 0 {
+		t.Fatalf("no fetch should happen before any request, got %d", got)
+	}
+
+	p.OnRequestStart()
+	time.Sleep(300 * time.Millisecond)
+	if got := h.reqs.Load(); got != 0 {
+		t.Fatalf("no fetch before the first 1s delay, got %d", got)
+	}
+	time.Sleep(1500 * time.Millisecond) // ~1.8s in: one fetch at the 1s mark
+	if got := h.reqs.Load(); got != 1 {
+		t.Fatalf("expected 1 fetch after the first delay, got %d", got)
+	}
+
+	// a concurrent request arrives and ends while the first is still in flight:
+	// probing must not stop
+	p.OnRequestStart()
+	p.OnRequestEnd()
+	time.Sleep(1500 * time.Millisecond)
+	if got := h.reqs.Load(); got < 2 {
+		t.Fatalf("expected continued sampling while a request is in flight, got %d", got)
+	}
+
+	// the last request ends: sampling stops
+	p.OnRequestEnd()
+	got := h.reqs.Load()
+	time.Sleep(1600 * time.Millisecond)
+	if now := h.reqs.Load(); now != got {
+		t.Fatalf("expected no fetch after the last request ended, got %d then %d", got, now)
+	}
+}
+
 // no generation (no processing in either window), no trigger
 func TestWatchdogTickIdle(t *testing.T) {
 	h := &slotsHandler{}

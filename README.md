@@ -77,7 +77,7 @@ Idle restart. An independent background check (once per second): timing starts a
 
 ### watchdog
 
-Speed watchdog. An independent background sampler polls the backend `/slots` every `watchdog.interval` seconds; if the average generation speed within a sample interval exceeds `watchdog.maxRate` t/s for `watchdog.times` consecutive samples (non-consecutive over-speed samples do not count), the backend is assumed to be stuck in an output loop (e.g. `//////`) and `watchdog.command` runs. The counter resets when the speed drops back or a sample fails; after a trigger or a `/slots` fetch failure the watchdog fully pauses for `watchdog.pause` seconds (no `/slots` fetching at all during the pause), and the first sample after the pause only rebuilds the baseline.
+Speed watchdog. Sampling is request-driven: while at least one `/v1/chat/completions` request is in flight, the backend `/slots` is polled — the first fetch happens a fixed 1 second after the request arrives, then every `watchdog.interval` seconds until the last request ends (no fetching at all when idle). If the average generation speed within a sample interval exceeds `watchdog.maxRate` t/s for `watchdog.times` consecutive samples (non-consecutive over-speed samples do not count), the backend is assumed to be stuck in an output loop (e.g. `//////`) and `watchdog.command` runs. The counter resets when the speed drops back or a sample fails; after a trigger or a `/slots` fetch failure the watchdog fully pauses for `watchdog.pause` seconds (no `/slots` fetching at all during the pause), and the first sample after the pause only rebuilds the baseline.
 
 When the over-speed streak is reached, the in-flight completions the supervisor is proxying are judged before triggering:
 
@@ -90,7 +90,7 @@ MTP draft-acceptance watchdog. The supervisor taps every `/v1/chat/completions` 
 | Field | Description |
 |---|---|
 | `watchdog.enable` | whether enabled, default `false` |
-| `watchdog.interval` | `/slots` sampling interval in seconds, default `2` (frequent sampling to detect early) |
+| `watchdog.interval` | `/slots` sampling interval in seconds while a chat completion request is in flight (the first fetch happens a fixed 1 second after the request arrives), default `2` (frequent sampling to detect early) |
 | `watchdog.maxRate` | max generation speed (t/s); the average speed within a sample interval above this counts as one over-speed sample, default `300` |
 | `watchdog.times` | consecutive over-speed samples required to declare unhealthy and run the command (non-consecutive over-speed samples do not count), default `2` |
 | `watchdog.minDraftRate` | min MTP draft acceptance ratio (`timings.draft_n_accepted / timings.draft_n`) sampled from each observed completion; a completion below it for `watchdog.draftTimes` in a row is declared unhealthy and runs the command, default `0` (off) |

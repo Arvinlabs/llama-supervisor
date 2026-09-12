@@ -116,10 +116,16 @@ type streamState struct {
 	degenerate bool // sticky: the generated content fell into a repeated-rune dead loop
 }
 
-// Policy watchdog strategy: sample the backend /slots frequently, and when the generation
-// speed keeps exceeding the threshold (very likely an output loop) run watchdog.command (similar to
-// restart); after a trigger or a /slots fetch failure the watchdog fully pauses (no fetching at
-// all) for pause seconds
+// firstProbeDelay is the fixed delay between a request arriving and the first /slots fetch;
+// later fetches follow the configured interval
+const firstProbeDelay = time.Second
+
+// Policy watchdog strategy: while at least one chat completion request is in flight, sample
+// the backend /slots (first fetch a fixed firstProbeDelay after the first request arrives,
+// then every interval seconds) and, when the generation speed keeps exceeding the threshold
+// (very likely an output loop) run watchdog.command (similar to restart); when no request is
+// in flight no sampling happens at all. After a trigger or a /slots fetch failure the watchdog
+// fully pauses (no fetching) for pause seconds
 type Policy struct {
 	mu          sync.Mutex
 	config      Config
@@ -132,6 +138,9 @@ type Policy struct {
 	pauseUntil  time.Time            // fully paused (no fetching) before this moment
 	skipNext    bool                 // after a pause the first sample only rebuilds the baseline (no rate check)
 	lastFail    string               // last fetch error message; only logged when it changes
+	active      int                  // in-flight chat completion requests; probing runs while > 0
+	probing     bool                 // whether the sampling loop is running
+	stopProbe   chan struct{}        // closed to stop the sampling loop
 }
 
 // newWatchdogPolicy creates the watchdog policy; apiKey is the global apiKey
@@ -147,6 +156,69 @@ func New(g *config.WatchdogGroup, backend string, apiKey string) *Policy {
 // Interval returns the effective sampling interval
 func (w *Policy) Interval() time.Duration {
 	return w.config.Interval
+}
+
+// OnRequestStart registers one in-flight chat completion request (the proxy calls it when
+// the request is forwarded and OnRequestEnd when it finishes). The first request starts the
+// sampling loop: the first /slots fetch happens a fixed firstProbeDelay later, then one
+// fetch per interval as long as any request is still in flight. Concurrent requests are
+// counted, so probing only stops once the last one ends.
+func (w *Policy) OnRequestStart() {
+	w.mu.Lock()
+	w.active++
+	if w.active == 1 && !w.probing {
+		w.probing = true
+		w.stopProbe = make(chan struct{})
+		stop := w.stopProbe
+		go w.probeLoop(stop)
+	}
+	w.mu.Unlock()
+}
+
+// OnRequestEnd unregisters one in-flight chat completion request; when the last one ends
+// the sampling loop stops (no more /slots fetching)
+func (w *Policy) OnRequestEnd() {
+	w.mu.Lock()
+	if w.active > 0 {
+		w.active--
+	}
+	if w.active == 0 && w.probing {
+		w.probing = false
+		stop := w.stopProbe
+		w.stopProbe = nil
+		w.mu.Unlock()
+		close(stop)
+		return
+	}
+	w.mu.Unlock()
+}
+
+// probeLoop is the request-driven sampling loop: first fetch a fixed firstProbeDelay after
+// the triggering request arrived, then one Tick per interval; it exits as soon as no
+// request is in flight anymore (or OnRequestEnd closed stop)
+func (w *Policy) probeLoop(stop chan struct{}) {
+	timer := time.NewTimer(firstProbeDelay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			w.Tick(context.Background())
+			w.mu.Lock()
+			if w.stopProbe != stop { // a stop/start cycle happened during the tick: the new loop owns sampling now
+				w.mu.Unlock()
+				return
+			}
+			if w.active == 0 {
+				w.probing = false
+				w.mu.Unlock()
+				return
+			}
+			w.mu.Unlock()
+			timer.Reset(w.config.Interval)
+		}
+	}
 }
 
 // tick performs one sample: fetch /slots, compare with the previous sample, and once the

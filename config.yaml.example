@@ -44,7 +44,9 @@ probe:
 # ===== watchdog config: enabled when enable is true =====
 watchdog:
   enable: true
-  # /slots sampling interval in seconds, default 2
+  # /slots sampling interval in seconds, default 2. Sampling is request-driven:
+  # the first fetch happens a fixed 1 second after a chat completion request arrives,
+  # then every interval as long as any request is in flight (idle means no sampling)
   interval: 2
   # max generation speed (t/s); above it is declared unhealthy (output loop), default 300
   maxRate: 300

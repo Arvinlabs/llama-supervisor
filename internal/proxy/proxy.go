@@ -268,13 +268,20 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the backend read is interrupted, and "client disconnected" is logged from ctxBody/ErrorHandler.
 	// Note: r.Context().Err() must not be used here to detect this, because net/http also cancels
 	// the ctx after the handler returns normally, which would be a false positive.
+	// watchdog probing is request-driven: a forwarded chat completion request starts the
+	// /slots sampling loop (first fetch a fixed 1s later, then per interval) and the last
+	// one in flight to end stops it; other paths never trigger sampling
+	if p.watchdog != nil && r.URL.Path == completionsPath {
+		p.watchdog.OnRequestStart()
+		defer p.watchdog.OnRequestEnd()
+	}
 	p.proxy.ServeHTTP(rec, r)
 	logAccess(rec.status, r, start)
 }
 
 // StartBackground starts the background checkers:
-// restart checks once per second and runs restart.command when the idle deadline is crossed, periodically repeatable;
-// watchdog samples /slots at the configured interval and runs watchdog.command when the speed keeps exceeding the limit
+// restart checks once per second and runs restart.command when the idle deadline is crossed, periodically repeatable.
+// (the watchdog's /slots sampling is request-driven and runs inside the watchdog policy itself)
 func (p *Supervisor) StartBackground(ctx context.Context) {
 	if p.restart != nil {
 		go func() {
@@ -286,20 +293,6 @@ func (p *Supervisor) StartBackground(ctx context.Context) {
 					return
 				case <-ticker.C:
 					p.restart.ConsumeIdle(ctx)
-				}
-			}
-		}()
-	}
-	if p.watchdog != nil {
-		go func() {
-			ticker := time.NewTicker(p.watchdog.Interval())
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					p.watchdog.Tick(ctx)
 				}
 			}
 		}()
