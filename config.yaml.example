@@ -58,6 +58,12 @@ watchdog:
   minDraftRate: 0
   # consecutive low draft-acceptance completions required to declare unhealthy, default 10
   draftTimes: 10
+  # content-loop judgment at an over-speed trigger: consecutive identical tail runes in a
+  # streaming completion's generated content that mark it a dead loop; when the over-speed
+  # streak is reached, a streaming in-flight completion triggers only when its content is
+  # degenerate (held and re-judged until then), while a non-streaming one, having no content
+  # to judge, triggers directly. Default 10
+  repeatLimit: 10
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 

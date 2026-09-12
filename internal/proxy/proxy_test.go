@@ -583,6 +583,74 @@ func TestObservationFromSSELine(t *testing.T) {
 	}
 }
 
+// contentFromSSELine extracts only the generated content (content + reasoning_content);
+// usage lines, [DONE] and non-data lines yield nothing
+func TestContentFromSSELine(t *testing.T) {
+	if got := contentFromSSELine([]byte(`data: {"choices":[{"delta":{"content":"hi","reasoning_content":"think "}}]}`)); got != "think hi" {
+		t.Fatalf("content = %q", got)
+	}
+	for _, l := range []string{
+		"data: [DONE]",
+		"data:",
+		": keep-alive",
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}",
+		"",
+	} {
+		if got := contentFromSSELine([]byte(l)); got != "" {
+			t.Fatalf("line must yield no content: %q -> %q", l, got)
+		}
+	}
+}
+
+// the hub delivers the in-flight stream lifecycle and content to stream consumers
+func TestHubStreamConsumers(t *testing.T) {
+	var got []string
+	hub := &observe.Hub{}
+	hub.RegisterStream(nil) // ignored
+	rec := &streamRec{log: &got}
+	hub.RegisterStream(rec)
+
+	id := hub.StreamStart(true)
+	hub.StreamContent(id, "aa")
+	hub.StreamContent(id, "bb")
+	hub.StreamContent(id, "") // no-op
+	hub.StreamEnd(id)
+	want := []string{"start", "content", "content", "end"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+// streamRec records the stream consumer calls (id numbers are process-unique, so the test
+// counts calls instead of ids)
+type streamRec struct {
+	mu  sync.Mutex
+	log *[]string
+}
+
+func (r *streamRec) OnStreamStart(_ int, _ bool) {
+	r.append("start")
+}
+
+func (r *streamRec) OnStreamContent(_ int, _ string) {
+	r.append("content")
+}
+
+func (r *streamRec) OnStreamEnd(_ int) {
+	r.append("end")
+}
+
+func (r *streamRec) append(s string) {
+	r.mu.Lock()
+	*r.log = append(*r.log, s)
+	r.mu.Unlock()
+}
+
 // newCompletionsRequest builds a POST /v1/chat/completions request with the given body
 func newCompletionsRequest(t *testing.T, body string) *http.Request {
 	t.Helper()

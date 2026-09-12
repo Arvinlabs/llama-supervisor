@@ -100,10 +100,12 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		// out to the consumers (outermost wrap, so an injected stream error event still
 		// flows through the scanner); active whenever at least one consumer is registered
 		if p.observe && res.Body != nil && res.Request.URL.Path == completionsPath {
+			stream := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
 			res.Body = &completionTap{
 				inner:  res.Body,
 				hub:    p.hub,
-				stream: strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream"),
+				stream: stream,
+				id:     p.hub.StreamStart(stream),
 			}
 		}
 		cb.watch()
@@ -130,6 +132,7 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	if cfg.Watchdog.Enabled() {
 		p.watchdog = watchdog.New(cfg.Watchdog, cfg.Backend, cfg.ApiKey)
 		p.hub.Register(p.watchdog)
+		p.hub.RegisterStream(p.watchdog) // the over-speed trigger judges in-flight completions by their kind and generated content
 	}
 	// the completion tap is active whenever any consumer (stats or watchdog) subscribed
 	p.observe = p.hub.Len() > 0

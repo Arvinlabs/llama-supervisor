@@ -54,6 +54,7 @@ type completionTap struct {
 	inner   io.ReadCloser
 	hub     *observe.Hub
 	stream  bool
+	id      int    // the hub stream id of this in-flight completion (stream consumers, e.g. the watchdog over-speed judgment)
 	partial []byte // stream: the unfinished trailing SSE line
 	buf     []byte // non-stream: accumulated body, parsed once at EOF
 	done    bool   // observation already published
@@ -88,6 +89,10 @@ func (b *completionTap) scan(chunk []byte) {
 		}
 		line := b.partial[:i+1]
 		b.partial = b.partial[i+1:]
+		// feed the generated content to the stream consumers (the watchdog over-speed judgment)
+		if s := contentFromSSELine(line); s != "" {
+			b.hub.StreamContent(b.id, s)
+		}
 		if o, ok := observationFromSSELine(line); ok {
 			b.publish(o)
 			return
@@ -106,10 +111,28 @@ func (b *completionTap) publish(o observe.Observation) {
 	b.buf = nil
 }
 
-// Close forwards to the inner body; the http client closes the backend TCP
-// connection when the body is closed before full read, so the backend stops
-// processing early
-func (b *completionTap) Close() error { return b.inner.Close() }
+// Close unregisters this completion from the stream consumers and forwards to the inner
+// body; the http client closes the backend TCP connection when the body is closed before
+// full read, so the backend stops processing early
+func (b *completionTap) Close() error {
+	b.hub.StreamEnd(b.id)
+	return b.inner.Close()
+}
+
+// contentFromSSELine extracts the generated content (content and reasoning_content) from
+// one complete SSE line; empty for non-data lines and the [DONE] terminator
+func contentFromSSELine(line []byte) string {
+	line = bytes.TrimLeft(line, " \t\r\n")
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return ""
+	}
+	data := bytes.TrimSpace(line[len("data:"):])
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return ""
+	}
+	return gjson.GetBytes(data, "choices.0.delta.reasoning_content").String() +
+		gjson.GetBytes(data, "choices.0.delta.content").String()
+}
 
 // observationFromSSELine extracts an Observation from one complete SSE line; it
 // reports ok only when the line is a `data:` event carrying completion data

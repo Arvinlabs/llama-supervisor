@@ -262,6 +262,85 @@ func TestWatchdogTickFetchFailResetsStreak(t *testing.T) {
 	}
 }
 
+// a non-streaming completion in flight has no content to judge: the over-speed streak triggers directly
+func TestWatchdogLoopNonStreamTriggers(t *testing.T) {
+	h := &slotsHandler{}
+	h.nDecoded.Store(100)
+	h.processing.Store(true)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := New(&config.WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
+
+	p.Tick(t.Context())       // sample 1: baseline n=100
+	p.OnStreamStart(1, false) // a non-streaming completion is in flight
+	h.nDecoded.Store(300)
+	p.Tick(t.Context()) // fast 1/2
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("a single over-speed sample should not trigger")
+	}
+	h.nDecoded.Store(600)
+	p.Tick(t.Context()) // fast 2/2 -> non-streaming in flight, trigger directly
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("expected a direct trigger when a non-streaming completion is in flight")
+	}
+	p.OnStreamEnd(1)
+}
+
+// an over-speed whose in-flight stream is not in a content loop is held, and re-judged on
+// each further over-speed sample while the streak is running; when the content degenerates
+// it triggers
+func TestWatchdogLoopStreamHoldsUntilLoop(t *testing.T) {
+	h := &slotsHandler{}
+	h.nDecoded.Store(100)
+	h.processing.Store(true)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := New(&config.WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, RepeatLimit: 3, Command: ""}, srv.URL, "")
+
+	p.Tick(t.Context()) // baseline
+	id := 0
+	p.OnStreamStart(id, true)
+	p.OnStreamContent(id, "hello world, generating fast and fine, ")
+	h.nDecoded.Store(300)
+	p.Tick(t.Context()) // fast 1/2
+	p.OnStreamContent(id, "still producing varied content, ")
+	h.nDecoded.Store(600)
+	p.Tick(t.Context()) // fast 2/2 -> judged: healthy content, hold
+	if time.Now().Before(p.pauseUntil) {
+		t.Fatal("an over-speed stream with healthy content must not trigger")
+	}
+	p.OnStreamContent(id, "###") // the dead loop appears while still over-speed
+	h.nDecoded.Store(900)
+	p.Tick(t.Context()) // fast 3/2 -> judged again: content loop, trigger
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("a held over-speed should trigger once the content degenerates")
+	}
+	p.OnStreamEnd(id)
+}
+
+// an over-speed with no in-flight completion visible to the tap (the request did not go
+// through this proxy) triggers directly
+func TestWatchdogLoopUnknownTriggers(t *testing.T) {
+	h := &slotsHandler{}
+	h.nDecoded.Store(100)
+	h.processing.Store(true)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := New(&config.WatchdogGroup{Enable: true, Interval: 1, MaxRate: 10, Times: 2, Command: ""}, srv.URL, "")
+
+	p.Tick(t.Context()) // baseline
+	h.nDecoded.Store(300)
+	p.Tick(t.Context()) // fast 1/2
+	h.nDecoded.Store(600)
+	p.Tick(t.Context()) // fast 2/2 -> nothing in flight, trigger directly
+	if !time.Now().Before(p.pauseUntil) {
+		t.Fatal("an over-speed with no in-flight completion should trigger directly")
+	}
+}
+
 func TestBuildWatchdogConfigDefaults(t *testing.T) {
 	wc := BuildWatchdogConfig(&config.WatchdogGroup{Enable: true})
 	if wc.Interval != 2*time.Second || wc.MaxRate != 300 || wc.Times != 2 || wc.Pause != 30*time.Second || wc.Command != "" || wc.Verbose {
@@ -352,5 +431,17 @@ func TestBuildWatchdogConfigDraft(t *testing.T) {
 	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.1, DraftTimes: 5})
 	if wc.MinDraftRate != 0.1 || wc.DraftTimes != 5 {
 		t.Fatalf("unexpected draft overrides: minDraftRate=%v draftTimes=%d", wc.MinDraftRate, wc.DraftTimes)
+	}
+}
+
+// BuildWatchdogConfig defaults and overrides for the content-loop judgment
+func TestBuildWatchdogConfigRepeatLimit(t *testing.T) {
+	wc := BuildWatchdogConfig(&config.WatchdogGroup{Enable: true})
+	if wc.RepeatLimit != 10 {
+		t.Fatalf("unexpected repeatLimit default: %d", wc.RepeatLimit)
+	}
+	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, RepeatLimit: 8})
+	if wc.RepeatLimit != 8 {
+		t.Fatalf("unexpected repeatLimit override: %d", wc.RepeatLimit)
 	}
 }

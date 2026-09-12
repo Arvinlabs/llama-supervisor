@@ -80,8 +80,8 @@ func main() {
 		if wc.MinDraftRate > 0 {
 			draft = fmt.Sprintf("%.3f/%d", wc.MinDraftRate, wc.DraftTimes)
 		}
-		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d pause=%ds minDraftRate=%s",
-			int(wc.Interval.Seconds()), wc.MaxRate, wc.Times, int(wc.Pause.Seconds()), draft)
+		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d minDraftRate=%s repeatLimit=%d pause=%ds",
+			int(wc.Interval.Seconds()), wc.MaxRate, wc.Times, draft, wc.RepeatLimit, int(wc.Pause.Seconds()))
 		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
 	} else {
 		log.Print("[config] watchdog disabled")

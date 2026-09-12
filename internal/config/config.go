@@ -52,8 +52,13 @@ type WatchdogGroup struct {
 	// 0 (default) disables this check
 	MinDraftRate float64 `yaml:"minDraftRate"`
 	// DraftTimes consecutive low draft-acceptance completions required to declare unhealthy, default 10
-	DraftTimes int    `yaml:"draftTimes"`
-	Command    string `yaml:"command"` // shell command run after declaring unhealthy
+	DraftTimes int `yaml:"draftTimes"`
+	// RepeatLimit consecutive identical tail runes in a streaming completion's generated
+	// content that mark it a dead loop: when the over-speed streak is reached, a streaming
+	// in-flight completion triggers only when its content is degenerate (a non-streaming
+	// one, having no content to judge, triggers directly). Default 10
+	RepeatLimit int    `yaml:"repeatLimit"`
+	Command     string `yaml:"command"` // shell command run after declaring unhealthy
 }
 
 func (g *WatchdogGroup) Enabled() bool {
