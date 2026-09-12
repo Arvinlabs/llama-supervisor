@@ -23,8 +23,16 @@ type Config struct {
 	Prompt       string
 	MaxTokens    int
 	RepeatLimit  int
-	SuccessLimit int // normal content reaching this many cumulative characters is declared healthy early without waiting for generation to end; 0 disables it
+	RepeatChars  string // whitelist: only these characters' consecutive repetition counts as degenerate; empty means any character
+	SuccessLimit int    // normal content reaching this many cumulative characters is declared healthy early without waiting for generation to end; 0 disables it
 	Timeout      time.Duration
+	repeatSet    map[rune]bool // built from RepeatChars; nil means any character counts
+}
+
+// countsRepeat reports whether a rune's consecutive repetition counts as a dead loop:
+// every rune when no whitelist is configured, otherwise only the listed ones
+func (pc Config) countsRepeat(r rune) bool {
+	return pc.repeatSet == nil || pc.repeatSet[r]
 }
 
 // BuildProbeConfig builds the effective probe parameters from the probe config group (filling in
@@ -50,6 +58,13 @@ func BuildProbeConfig(g *config.ProbeGroup, apiKey string) Config {
 	}
 	if g.RepeatLimit > 0 {
 		pc.RepeatLimit = g.RepeatLimit
+	}
+	pc.RepeatChars = g.RepeatChars
+	if g.RepeatChars != "" {
+		pc.repeatSet = make(map[rune]bool)
+		for _, r := range g.RepeatChars {
+			pc.repeatSet[r] = true
+		}
 	}
 	if g.SuccessLimit > 0 {
 		pc.SuccessLimit = g.SuccessLimit
@@ -102,8 +117,8 @@ func (p *Policy) ConsumeIdle(_ context.Context) bool {
 
 // runProbe probes the backend; on unhealthy it runs probe.command and returns whether the command was actually executed
 func (p *Policy) runProbe(ctx context.Context) bool {
-	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds",
-		p.backend, p.probe.Model, p.probe.Prompt, p.probe.MaxTokens, p.probe.RepeatLimit, p.probe.SuccessLimit, int(p.probe.Timeout.Seconds()))
+	log.Printf("[probe] triggered: backend=%s model=%q prompt=%q maxTokens=%d repeatLimit=%d repeatChars=%q successLimit=%d timeout=%ds",
+		p.backend, p.probe.Model, p.probe.Prompt, p.probe.MaxTokens, p.probe.RepeatLimit, p.probe.RepeatChars, p.probe.SuccessLimit, int(p.probe.Timeout.Seconds()))
 	healthy, err := probeBackend(ctx, p.backend, p.probe)
 	if healthy {
 		log.Print("[probe] backend looks healthy")
@@ -167,22 +182,26 @@ type sseEvent struct {
 	} `json:"choices"`
 }
 
-// repeatChecker independently counts the tail-character repeat run of one field
+// repeatChecker independently counts the tail-character repeat run of one field; only the
+// runes counted by counts (the repeatChars whitelist, any rune when nil) can reach the limit,
+// and a rune that is not counted also breaks the run of one that is
 type repeatChecker struct {
 	limit    int
+	counts   func(rune) bool
 	lastChar rune
 	run      int
 }
 
 func (c *repeatChecker) check(field string, s string) (bool, error) {
 	for _, r := range s {
-		if r == c.lastChar {
+		counted := c.counts == nil || c.counts(r)
+		if counted && r == c.lastChar {
 			c.run++
 		} else {
 			c.lastChar = r
 			c.run = 1
 		}
-		if c.run >= c.limit {
+		if counted && c.run >= c.limit {
 			return false, fmt.Errorf("degenerate %s: %d consecutive repeated char %q", field, c.run, c.lastChar)
 		}
 	}
@@ -194,8 +213,9 @@ func probeBackendStreaming(body io.Reader, pc Config) (bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	reasoningCheck := &repeatChecker{limit: pc.RepeatLimit}
-	contentCheck := &repeatChecker{limit: pc.RepeatLimit}
+	counts := pc.countsRepeat
+	reasoningCheck := &repeatChecker{limit: pc.RepeatLimit, counts: counts}
+	contentCheck := &repeatChecker{limit: pc.RepeatLimit, counts: counts}
 	totalLen := 0 // cumulative normal generated characters (reasoning_content + content)
 
 	for scanner.Scan() {

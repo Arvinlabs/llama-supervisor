@@ -68,8 +68,8 @@ func main() {
 	}
 	if cfg.Probe.Enabled() {
 		pc := probe.BuildProbeConfig(cfg.Probe, cfg.ApiKey)
-		log.Printf("[config] probe enabled: interval=%ds model=%q maxTokens=%d repeatLimit=%d successLimit=%d timeout=%ds",
-			int(config.ProbeInterval(cfg).Seconds()), pc.Model, pc.MaxTokens, pc.RepeatLimit, pc.SuccessLimit, int(pc.Timeout.Seconds()))
+		log.Printf("[config] probe enabled: interval=%ds model=%q maxTokens=%d repeatLimit=%d repeatChars=%q successLimit=%d timeout=%ds",
+			int(config.ProbeInterval(cfg).Seconds()), pc.Model, pc.MaxTokens, pc.RepeatLimit, pc.RepeatChars, pc.SuccessLimit, int(pc.Timeout.Seconds()))
 		log.Print("[config] probe command: " + cfg.Probe.Command)
 	} else {
 		log.Print("[config] probe disabled")
@@ -80,8 +80,8 @@ func main() {
 		if wc.MinDraftRate > 0 {
 			draft = fmt.Sprintf("%.3f/%d", wc.MinDraftRate, wc.DraftTimes)
 		}
-		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d minDraftRate=%s repeatLimit=%d pause=%ds",
-			int(wc.Interval.Seconds()), wc.MaxRate, wc.Times, draft, wc.RepeatLimit, int(wc.Pause.Seconds()))
+		log.Printf("[config] watchdog enabled: interval=%ds maxRate=%gt/s times=%d minDraftRate=%s repeatLimit=%d repeatChars=%q pause=%ds",
+			int(wc.Interval.Seconds()), wc.MaxRate, wc.Times, draft, wc.RepeatLimit, wc.RepeatChars, int(wc.Pause.Seconds()))
 		log.Print("[config] watchdog command: " + cfg.Watchdog.Command)
 	} else {
 		log.Print("[config] watchdog disabled")

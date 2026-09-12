@@ -34,6 +34,8 @@ probe:
   maxTokens: 64
   # repeated-tail threshold for declaring unhealthy, default 10
   repeatLimit: 10
+  # whitelist: only these characters' consecutive repetition counts as degenerate; empty (default) means any character
+  repeatChars: ""
   # once normal content reaches this many characters the backend is declared healthy early without waiting for generation to finish, default 20 (negative disables)
   successLimit: 20
   # probe timeout in seconds, default 5
@@ -64,6 +66,9 @@ watchdog:
   # degenerate (held and re-judged until then), while a non-streaming one, having no content
   # to judge, triggers directly. Default 10
   repeatLimit: 10
+  # whitelist: only these characters' consecutive repetition counts as a dead loop; empty
+  # (default) means any character
+  repeatChars: ""
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 

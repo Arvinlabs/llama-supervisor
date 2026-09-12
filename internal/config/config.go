@@ -30,6 +30,7 @@ type ProbeGroup struct {
 	Prompt       string `yaml:"prompt"`       // probe prompt, default "hi"
 	MaxTokens    int    `yaml:"maxTokens"`    // max generated tokens for the probe, default 64
 	RepeatLimit  int    `yaml:"repeatLimit"`  // repeated-tail threshold for declaring unhealthy, default 10
+	RepeatChars  string `yaml:"repeatChars"`  // whitelist: only these characters' consecutive repetition counts as degenerate; empty (default) means any character
 	SuccessLimit int    `yaml:"successLimit"` // normal content reaching this many cumulative characters is declared healthy early, default 20
 	Timeout      int    `yaml:"timeout"`      // probe timeout in seconds, default 5
 }
@@ -57,7 +58,10 @@ type WatchdogGroup struct {
 	// content that mark it a dead loop: when the over-speed streak is reached, a streaming
 	// in-flight completion triggers only when its content is degenerate (a non-streaming
 	// one, having no content to judge, triggers directly). Default 10
-	RepeatLimit int    `yaml:"repeatLimit"`
+	RepeatLimit int `yaml:"repeatLimit"`
+	// RepeatChars whitelist: only these characters' consecutive repetition counts as a dead
+	// loop; empty (default) means any character
+	RepeatChars string `yaml:"repeatChars"`
 	Command     string `yaml:"command"` // shell command run after declaring unhealthy
 }
 

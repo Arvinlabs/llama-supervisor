@@ -39,6 +39,16 @@ type Config struct {
 	// in-flight completion triggers only when its content is degenerate, while a non-streaming
 	// one (no content to judge yet) triggers directly, default 10
 	RepeatLimit int
+	// RepeatChars is the whitelist of runes whose consecutive repetition counts as a dead
+	// loop; empty means any rune counts
+	RepeatChars string
+	repeatSet   map[rune]bool // built from RepeatChars; nil means any rune counts
+}
+
+// countsRepeat reports whether a rune's consecutive repetition counts as a dead loop:
+// every rune when no whitelist is configured, otherwise only the listed ones
+func (w *Policy) countsRepeat(r rune) bool {
+	return w.config.repeatSet == nil || w.config.repeatSet[r]
 }
 
 // BuildWatchdogConfig builds the effective parameters from the watchdog config group (filling in defaults)
@@ -71,6 +81,13 @@ func BuildWatchdogConfig(g *config.WatchdogGroup) Config {
 	}
 	if g.RepeatLimit > 0 {
 		wc.RepeatLimit = g.RepeatLimit
+	}
+	wc.RepeatChars = g.RepeatChars
+	if g.RepeatChars != "" {
+		wc.repeatSet = make(map[rune]bool)
+		for _, r := range g.RepeatChars {
+			wc.repeatSet[r] = true
+		}
 	}
 	return wc
 }
@@ -309,18 +326,20 @@ func (w *Policy) OnStreamStart(id int, stream bool) {
 
 // OnStreamContent feeds one piece of generated content (content and reasoning_content) of
 // one streaming completion; the over-speed monitor marks the stream degenerate once its
-// tail keeps the same rune for RepeatLimit in a row (a typical dead loop, e.g. "////")
+// tail keeps the same whitelisted rune (repeatChars; any rune when empty) for RepeatLimit in
+// a row (a typical dead loop, e.g. "////"); a rune that is not counted also breaks the run
 func (w *Policy) OnStreamContent(id int, content string) {
 	w.mu.Lock()
 	if s, ok := w.streams[id]; ok {
 		for _, r := range content {
-			if r == s.lastRune {
+			counted := w.countsRepeat(r)
+			if counted && r == s.lastRune {
 				s.run++
 			} else {
 				s.lastRune = r
 				s.run = 1
 			}
-			if !s.degenerate && s.run >= w.config.RepeatLimit {
+			if !s.degenerate && counted && s.run >= w.config.RepeatLimit {
 				s.degenerate = true
 			}
 		}

@@ -48,7 +48,7 @@ cp config.yaml.example config.yaml
 
 Idle health probe. Timing starts at service startup and every request extends the idle window; once idle for `probe.interval` seconds, the next request first triggers a probe (a streaming `/v1/chat/completions` call to the backend, using the server-level ctx so a user disconnect does not affect it) before proxying:
 
-- during streaming, `reasoning_content` and `content` are checked independently; if the tail character of either repeats `probe.repeatLimit` times, the probe is aborted early and the backend is declared unhealthy (a probe failure is also unhealthy).
+- during streaming, `reasoning_content` and `content` are checked independently; if the tail character of either repeats `probe.repeatLimit` times (only characters listed in `probe.repeatChars` count, any character when it is empty), the probe is aborted early and the backend is declared unhealthy (a probe failure is also unhealthy).
 - if the content is normal and reaches `probe.successLimit` cumulative characters, the backend is declared healthy early, without waiting for generation to finish.
 - unhealthy: run `probe.command`, then poll the backend `/health` every 0.5s until it returns 2xx before forwarding. Healthy: proxy directly.
 
@@ -60,7 +60,8 @@ Idle health probe. Timing starts at service startup and every request extends th
 | `probe.model` | model used by the probe request, default `default` |
 | `probe.prompt` | probe prompt, default `hi` |
 | `probe.maxTokens` | max generated tokens for the probe, default `64` |
-| `probe.repeatLimit` | same tail character (including `reasoning_content`) repeated this many times in a row is declared unhealthy, default `10` |
+| `probe.repeatLimit` | same tail character (including `reasoning_content`) repeated this many times in a row is declared unhealthy (only characters in `probe.repeatChars` count), default `10` |
+| `probe.repeatChars` | whitelist of characters whose consecutive repetition counts as degenerate; a character not listed also breaks a run of one that is; empty (default) means any character |
 | `probe.successLimit` | once normal content reaches this many cumulative characters, the backend is declared healthy early and the probe ends without waiting for generation to finish, default `20` (negative disables) |
 | `probe.timeout` | probe timeout in seconds, default `5` |
 
@@ -81,7 +82,7 @@ Speed watchdog. An independent background sampler polls the backend `/slots` eve
 When the over-speed streak is reached, the in-flight completions the supervisor is proxying are judged before triggering:
 
 - a **non-streaming** completion has no content to judge yet — it triggers directly;
-- a **streaming** completion is judged by its generated content (the supervisor taps `content` and `reasoning_content` from the stream live): it triggers only when the generated tail has degenerated into a dead loop — the same rune repeated `watchdog.repeatLimit` times in a row (e.g. `////`); as long as all in-flight streams look healthy the trigger is held and re-judged on each further over-speed sample while the streak is still running;
+- a **streaming** completion is judged by its generated content (the supervisor taps `content` and `reasoning_content` from the stream live): it triggers only when the generated tail has degenerated into a dead loop — the same rune repeated `watchdog.repeatLimit` times in a row (e.g. `////`; only runes listed in `watchdog.repeatChars` count, any rune when it is empty); as long as all in-flight streams look healthy the trigger is held and re-judged on each further over-speed sample while the streak is still running;
 - an over-speed with no in-flight completion visible to the tap (e.g. the request did not go through this proxy) triggers directly.
 
 MTP draft-acceptance watchdog. The supervisor taps every `/v1/chat/completions` response (streaming and non-streaming) and reads the backend's `timings`, which report `draft_n` (speculative/MTP draft tokens attempted) and `draft_n_accepted` (draft tokens accepted); the acceptance ratio is `draft_n_accepted / draft_n`. When `watchdog.minDraftRate` is set (> 0) and the ratio stays below it for `watchdog.draftTimes` consecutive completions (completions without draft data are ignored, so a backend without speculative decoding never trips this), the backend is declared unhealthy and `watchdog.command` runs, and the watchdog fully pauses for `watchdog.pause` seconds. This check shares its pause window with the speed check, and enabling it is what turns the completion tap (and the `stream_options.include_usage` request injection that makes the `timings` present on streams) active. `watchdog.minDraftRate: 0` (the default) turns it off.
@@ -94,7 +95,8 @@ MTP draft-acceptance watchdog. The supervisor taps every `/v1/chat/completions` 
 | `watchdog.times` | consecutive over-speed samples required to declare unhealthy and run the command (non-consecutive over-speed samples do not count), default `2` |
 | `watchdog.minDraftRate` | min MTP draft acceptance ratio (`timings.draft_n_accepted / timings.draft_n`) sampled from each observed completion; a completion below it for `watchdog.draftTimes` in a row is declared unhealthy and runs the command, default `0` (off) |
 | `watchdog.draftTimes` | consecutive low draft-acceptance completions required to declare unhealthy, default `10` |
-| `watchdog.repeatLimit` | consecutive identical tail runes in a streaming completion's generated content that mark it a dead loop: when the over-speed streak is reached, a streaming in-flight completion triggers only when its content is degenerate (a non-streaming one triggers directly), default `10` |
+| `watchdog.repeatLimit` | consecutive identical tail runes in a streaming completion's generated content that mark it a dead loop: when the over-speed streak is reached, a streaming in-flight completion triggers only when its content is degenerate (a non-streaming one triggers directly; only runes in `watchdog.repeatChars` count), default `10` |
+| `watchdog.repeatChars` | whitelist of characters whose consecutive repetition counts as a dead loop; a character not listed also breaks a run of one that is; empty (default) means any character |
 | `watchdog.pause` | seconds the watchdog fully pauses (no `/slots` fetching at all) after a trigger or a `/slots` fetch failure, default `30` |
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |

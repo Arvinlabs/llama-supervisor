@@ -434,6 +434,34 @@ func TestBuildWatchdogConfigDraft(t *testing.T) {
 	}
 }
 
+// the repeatChars whitelist: only the listed runes count toward the dead loop, a non-listed
+// rune breaks the run, and an empty whitelist keeps counting any rune
+func TestWatchdogRepeatWhitelist(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, RepeatLimit: 3, RepeatChars: "/", Command: ""}, "http://127.0.0.1:1", "")
+	id := 0
+	p.OnStreamStart(id, true)
+	p.OnStreamContent(id, "aaaa") // 'a' is not whitelisted: no loop
+	if p.streams[id].degenerate {
+		t.Fatal("a run of a non-whitelisted rune must not count as a dead loop")
+	}
+	p.OnStreamStart(id+1, true)
+	p.OnStreamContent(id+1, "//a//") // broken by 'a': runs of 2 and 2
+	if p.streams[id+1].degenerate {
+		t.Fatal("a whitelisted run broken by another rune must not count")
+	}
+	p.OnStreamContent(id+1, "/") // the second run reaches 3: dead loop
+	if !p.streams[id+1].degenerate {
+		t.Fatal("a whitelisted run reaching the limit must mark the stream degenerate")
+	}
+
+	q := New(&config.WatchdogGroup{Enable: true, RepeatLimit: 3, Command: ""}, "http://127.0.0.1:1", "")
+	q.OnStreamStart(id, true)
+	q.OnStreamContent(id, "aaa") // empty whitelist: any rune counts
+	if !q.streams[id].degenerate {
+		t.Fatal("an empty whitelist must keep counting any rune")
+	}
+}
+
 // BuildWatchdogConfig defaults and overrides for the content-loop judgment
 func TestBuildWatchdogConfigRepeatLimit(t *testing.T) {
 	wc := BuildWatchdogConfig(&config.WatchdogGroup{Enable: true})

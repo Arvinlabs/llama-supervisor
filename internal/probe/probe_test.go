@@ -54,6 +54,45 @@ func TestRepeatChecker(t *testing.T) {
 	}
 }
 
+// the repeatChars whitelist: only the listed runes count as repetition, and a rune that is
+// not counted breaks the run of one that is
+func TestRepeatCheckerWhitelist(t *testing.T) {
+	counts := func(r rune) bool { return r == '/' }
+	if ok, _ := (&repeatChecker{limit: 3, counts: counts}).check("content", "aaaa"); !ok {
+		t.Fatal("a run of a non-whitelisted rune must not count")
+	}
+	if ok, _ := (&repeatChecker{limit: 3, counts: counts}).check("content", "//a//"); !ok {
+		t.Fatal("a non-whitelisted rune must break the whitelisted run")
+	}
+	if ok, err := (&repeatChecker{limit: 3, counts: counts}).check("content", "///"); ok || err == nil {
+		t.Fatalf("a whitelisted run reaching the limit must fail, got ok=%v err=%v", ok, err)
+	}
+}
+
+// BuildProbeConfig builds the whitelist set; an empty whitelist stays nil (any rune counts)
+func TestBuildProbeConfigRepeatChars(t *testing.T) {
+	pc := BuildProbeConfig(&config.ProbeGroup{RepeatChars: "/."}, "")
+	if pc.RepeatChars != "/." || !pc.repeatSet['/'] || !pc.repeatSet['.'] || pc.repeatSet['a'] {
+		t.Fatalf("unexpected whitelist: chars=%q set=%v", pc.RepeatChars, pc.repeatSet)
+	}
+	if pc = BuildProbeConfig(&config.ProbeGroup{}, ""); pc.RepeatChars != "" || pc.repeatSet != nil {
+		t.Fatalf("an empty whitelist must stay nil (any rune counts): %+v", pc)
+	}
+}
+
+// with a whitelist, a long run of a non-whitelisted rune is healthy
+func TestProbeBackendStreamingWhitelistIgnoresUnlistedRun(t *testing.T) {
+	var pairs [][2]string
+	for i := 0; i < 25; i++ {
+		pairs = append(pairs, [2]string{"", "x"})
+	}
+	pc := Config{RepeatLimit: 20, RepeatChars: "/"}
+	pc.repeatSet = map[rune]bool{'/': true}
+	if healthy, err := probeBackendStreaming(strings.NewReader(sseStream(pairs...)), pc); !healthy || err != nil {
+		t.Fatalf("a non-whitelisted run must be healthy, got healthy=%v err=%v", healthy, err)
+	}
+}
+
 func sseStream(pairs ...[2]string) string {
 	var b strings.Builder
 	for _, p := range pairs {
