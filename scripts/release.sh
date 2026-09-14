@@ -26,6 +26,22 @@ if ! git diff-index --quiet HEAD --; then
     fi
 fi
 
+# Run the test suite before releasing; abort on failure
+echo -e "\n${YELLOW}Running test suite (make test)...${NC}"
+if ! make test; then
+    echo -e "${RED}Error: tests failed, aborting release${NC}"
+    exit 1
+fi
+echo -e "${GREEN}All tests passed.${NC}"
+
+# Verify the project compiles for all release platforms; abort on failure
+echo -e "\n${YELLOW}Running compile check (make build-all)...${NC}"
+if ! make build-all; then
+    echo -e "${RED}Error: build failed, aborting release${NC}"
+    exit 1
+fi
+echo -e "${GREEN}Build OK for all platforms.${NC}"
+
 # Get current version
 CURRENT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
 echo -e "Current version: ${GREEN}${CURRENT_TAG}${NC}"
