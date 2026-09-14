@@ -66,17 +66,17 @@ func TestWatchdogTickDefaultTimes(t *testing.T) {
 	p.Tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(105)
 	p.Tick(t.Context()) // sample 2: 5 t/s < 10, normal
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("normal speed should not trigger")
 	}
 	h.nDecoded.Store(300)
 	p.Tick(t.Context()) // sample 3: 195 t/s > 10, fast 1/2, no trigger
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("single fast sample should not trigger with default times=2")
 	}
 	h.nDecoded.Store(500)
 	p.Tick(t.Context()) // sample 4: fast 2/2, trigger
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected pause window after two fast samples with default times=2")
 	}
 }
@@ -94,12 +94,12 @@ func TestWatchdogTickTriggersAfterTwoFast(t *testing.T) {
 	p.Tick(t.Context()) // sample 1: baseline n=100
 	h.nDecoded.Store(200)
 	p.Tick(t.Context()) // sample 2: fast 1/2
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("should not trigger on first fast sample")
 	}
 	h.nDecoded.Store(300)
 	p.Tick(t.Context()) // sample 3: fast 2/2, trigger
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected pause window after two consecutive fast samples")
 	}
 }
@@ -120,7 +120,7 @@ func TestWatchdogTickPauseWindow(t *testing.T) {
 	p.Tick(t.Context()) // fast 1/2, 2 fetches
 	h.nDecoded.Store(300)
 	p.Tick(t.Context()) // fast 2/2 -> fully paused, 3 fetches
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected full pause after trigger")
 	}
 	h.nDecoded.Store(900)
@@ -128,7 +128,7 @@ func TestWatchdogTickPauseWindow(t *testing.T) {
 	if got := h.reqs.Load(); got != 3 {
 		t.Fatalf("expected no fetch during the pause, got %d requests", got)
 	}
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected still paused inside the pause window")
 	}
 	// simulate the pause expiring: the first sample only rebuilds the baseline
@@ -136,12 +136,12 @@ func TestWatchdogTickPauseWindow(t *testing.T) {
 	p.Tick(t.Context()) // 4th fetch, baseline only (a 100 -> 900 jump must not count)
 	h.nDecoded.Store(2000)
 	p.Tick(t.Context()) // 1100 t/s but only fast 1/2, no trigger
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("single fast sample after resume should not trigger")
 	}
 	h.nDecoded.Store(3000)
 	p.Tick(t.Context()) // fast 2/2 after resume -> trigger again
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected re-trigger after two consecutive fast samples post-pause")
 	}
 }
@@ -163,7 +163,7 @@ func TestWatchdogTickRecovers(t *testing.T) {
 	p.Tick(t.Context()) // back to normal speed, counter reset
 	h.nDecoded.Store(300)
 	p.Tick(t.Context()) // another over-speed, only 1/2, no trigger
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("single fast window after recovery should not trigger")
 	}
 }
@@ -222,7 +222,7 @@ func TestWatchdogTickIdle(t *testing.T) {
 
 	p.Tick(t.Context())
 	p.Tick(t.Context())
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("idle backend should not trigger")
 	}
 }
@@ -295,13 +295,13 @@ func TestWatchdogTickFetchFailResetsStreak(t *testing.T) {
 	if p.wedges != 0 {
 		t.Fatalf("expected streak reset on fetch failure, got wedges=%d", p.wedges)
 	}
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected pause window after fetch failure")
 	}
 	// a second consecutive failure must not extend the active pause window
-	until := p.pauseUntil
+	until := p.pauseUntilEnd()
 	p.Tick(t.Context())
-	if !p.pauseUntil.Equal(until) {
+	if !p.pauseUntilEnd().Equal(until) {
 		t.Fatal("active pause window must not be extended by consecutive failures")
 	}
 }
@@ -320,12 +320,12 @@ func TestWatchdogLoopNonStreamTriggers(t *testing.T) {
 	p.OnStreamStart(1, false) // a non-streaming completion is in flight
 	h.nDecoded.Store(300)
 	p.Tick(t.Context()) // fast 1/2
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("a single over-speed sample should not trigger")
 	}
 	h.nDecoded.Store(600)
 	p.Tick(t.Context()) // fast 2/2 -> non-streaming in flight, trigger directly
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("expected a direct trigger when a non-streaming completion is in flight")
 	}
 	p.OnStreamEnd(1)
@@ -352,13 +352,13 @@ func TestWatchdogLoopStreamHoldsUntilLoop(t *testing.T) {
 	p.OnStreamContent(id, "still producing varied content, ")
 	h.nDecoded.Store(600)
 	p.Tick(t.Context()) // fast 2/2 -> judged: healthy content, hold
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("an over-speed stream with healthy content must not trigger")
 	}
 	p.OnStreamContent(id, "###") // the dead loop appears while still over-speed
 	h.nDecoded.Store(900)
 	p.Tick(t.Context()) // fast 3/2 -> judged again: content loop, trigger
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("a held over-speed should trigger once the content degenerates")
 	}
 	p.OnStreamEnd(id)
@@ -380,7 +380,7 @@ func TestWatchdogLoopUnknownTriggers(t *testing.T) {
 	p.Tick(t.Context()) // fast 1/2
 	h.nDecoded.Store(600)
 	p.Tick(t.Context()) // fast 2/2 -> nothing in flight, trigger directly
-	if !time.Now().Before(p.pauseUntil) {
+	if !p.paused() {
 		t.Fatal("an over-speed with no in-flight completion should trigger directly")
 	}
 }
@@ -399,6 +399,20 @@ func TestBuildWatchdogConfigOverrides(t *testing.T) {
 	}
 }
 
+// expectPaused waits (with a timeout) until the policy is in a full pause window;
+// needed for the draft check whose trigger runs in a background goroutine
+func expectPaused(t *testing.T, p *Policy) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !p.paused() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected a pause window after the trigger")
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // draftObs builds an observation with the given draft acceptance counters
 func draftObs(accepted, n int) observe.Observation {
 	return observe.Observation{DraftN: n, DraftAccepted: accepted}
@@ -408,13 +422,11 @@ func draftObs(accepted, n int) observe.Observation {
 func TestObserveDraftTriggers(t *testing.T) {
 	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
 	p.OnCompletion(draftObs(40, 100)) // 0.40 < 0.5, low 1/2
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("a single low sample should not trigger")
 	}
-	p.OnCompletion(draftObs(30, 100)) // 0.30 < 0.5, low 2/2 -> trigger
-	if !time.Now().Before(p.pauseUntil) {
-		t.Fatal("expected a pause window after two consecutive low samples")
-	}
+	p.OnCompletion(draftObs(30, 100)) // 0.30 < 0.5, low 2/2 -> trigger (runs in a goroutine)
+	expectPaused(t, p)
 }
 
 // an accepted sample at/above the threshold resets the streak
@@ -423,7 +435,7 @@ func TestObserveDraftResets(t *testing.T) {
 	p.OnCompletion(draftObs(40, 100)) // low 1/2
 	p.OnCompletion(draftObs(90, 100)) // 0.90 >= 0.5, streak reset
 	p.OnCompletion(draftObs(40, 100)) // low 1/2 again
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("a recovered streak must not trigger")
 	}
 }
@@ -433,7 +445,7 @@ func TestObserveDraftAtThreshold(t *testing.T) {
 	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
 	p.OnCompletion(draftObs(50, 100)) // 0.50 == 0.5, not below
 	p.OnCompletion(draftObs(50, 100))
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("at-threshold acceptance must not count as low")
 	}
 }
@@ -442,12 +454,12 @@ func TestObserveDraftAtThreshold(t *testing.T) {
 func TestObserveDraftIgnored(t *testing.T) {
 	disabled := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
 	disabled.OnCompletion(draftObs(1, 100)) // very low, but the check is disabled
-	if time.Now().Before(disabled.pauseUntil) {
+	if disabled.paused() {
 		t.Fatal("a disabled check must not trigger")
 	}
 	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 2, Command: ""}, "http://127.0.0.1:1", "")
 	p.OnCompletion(observe.Observation{Prompt: 10, Completion: 20, Total: 30}) // no draft data
-	if time.Now().Before(p.pauseUntil) {
+	if p.paused() {
 		t.Fatal("a no-draft observation must not trigger the draft check")
 	}
 }
@@ -455,13 +467,11 @@ func TestObserveDraftIgnored(t *testing.T) {
 // while paused the draft check does no bookkeeping and cannot extend the pause window
 func TestObserveDraftWhilePaused(t *testing.T) {
 	p := New(&config.WatchdogGroup{Enable: true, MinDraftRate: 0.5, DraftTimes: 1, Command: ""}, "http://127.0.0.1:1", "")
-	p.OnCompletion(draftObs(10, 100)) // low 1/1 -> trigger + pause
-	if !time.Now().Before(p.pauseUntil) {
-		t.Fatal("expected a pause window after the trigger")
-	}
-	until := p.pauseUntil
+	p.OnCompletion(draftObs(10, 100)) // low 1/1 -> trigger (runs in a goroutine) + pause
+	expectPaused(t, p)
+	until := p.pauseUntilEnd()
 	p.OnCompletion(draftObs(10, 100)) // still paused: ignored
-	if !p.pauseUntil.Equal(until) {
+	if !p.pauseUntilEnd().Equal(until) {
 		t.Fatal("an in-pause observation must not extend the pause window")
 	}
 }

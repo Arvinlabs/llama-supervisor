@@ -237,11 +237,12 @@ func (w *Policy) Tick(ctx context.Context) {
 
 	state, err := fetchSlots(ctx, w.backend, w.apiKey)
 	if err != nil {
-		if msg := err.Error(); msg != w.lastFail {
-			log.Printf("[watchdog] fetch /slots failed: %v", err)
-			w.lastFail = msg
-		}
+		msg := err.Error()
 		w.mu.Lock()
+		if msg != w.lastFail {
+			w.lastFail = msg
+			log.Printf("[watchdog] fetch /slots failed: %v", err)
+		}
 		// a failed sample breaks the streak: the next over-speed sample cannot be
 		// consecutive with an earlier one, so reset the consecutive counter
 		w.wedges = 0
@@ -254,9 +255,8 @@ func (w *Policy) Tick(ctx context.Context) {
 		w.mu.Unlock()
 		return
 	}
-	w.lastFail = ""
-
 	w.mu.Lock()
+	w.lastFail = ""
 	if w.skipNext { // first sample after a pause: the gap makes a rate check meaningless, baseline only
 		w.skipNext = false
 		w.wedges = 0
@@ -386,6 +386,20 @@ func (w *Policy) observeDraft(rate float64) {
 	}
 	go w.trigger(context.Background(), fmt.Sprintf("low draft acceptance: %.3f < min %.3f for %d completions in a row",
 		rate, w.config.MinDraftRate, w.config.DraftTimes))
+}
+
+// paused reports whether the watchdog is currently in a full pause window
+func (w *Policy) paused() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return time.Now().Before(w.pauseUntil)
+}
+
+// pauseUntilEnd returns the end of the current full pause window
+func (w *Policy) pauseUntilEnd() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pauseUntil
 }
 
 // OnStreamStart registers one in-flight /v1/chat/completions response; it implements
