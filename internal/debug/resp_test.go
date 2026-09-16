@@ -26,7 +26,7 @@ func TestAssembleCompletion(t *testing.T) {
 		t.Fatal("want the assembled completion")
 	}
 	m, _ := out.(map[string]any)
-	if m["object"] != "chat.completion" || m["id"] != "chatcmpl-x" || m["model"] != "qwen-local" || m["system_fingerprint"] != "b1" || m["created"] != float64(1789557159) {
+	if m["object"] != "chat.completion" || m["id"] != "chatcmpl-x" || m["model"] != "qwen-local" || m["system_fingerprint"] != "b1" || m["created"] != json.Number("1789557159") {
 		t.Fatalf("envelope not merged: %v", m)
 	}
 	chs, _ := m["choices"].([]any)
@@ -116,7 +116,7 @@ func TestParseSSEEvents(t *testing.T) {
 		t.Fatalf("want 3 events, got %d: %v", len(events), events)
 	}
 	obj, ok := events[0].(map[string]any)
-	if !ok || obj["a"] != float64(1) {
+	if !ok || obj["a"] != json.Number("1") { // numbers are kept as json.Number (literal form)
 		t.Fatalf("event 0 not parsed JSON: %v", events[0])
 	}
 	if events[1] != "[DONE]" {
@@ -314,6 +314,47 @@ func TestTapResponseNoHTMLEscapes(t *testing.T) {
 	if strings.Contains(s, `\u0026`) || strings.Contains(s, `\u003c`) || strings.Contains(s, `\u003e`) {
 		t.Fatalf("dump contains HTML escapes:\n%s", s)
 	}
+}
+
+// number literals survive the dump unchanged (no float64 round-trip): big integers keep
+// all digits, 1.10 and 1e5 keep their literal form, and the original key order is kept
+func TestTapResponseRawLiterals(t *testing.T) {
+	t.Run("non-streaming", func(t *testing.T) {
+		p := &Policy{respSavePath: t.TempDir()}
+		raw := `{"big":9007199254740993,"price":1.10,"exp":1e5,"s":"x"}`
+		res := &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(raw)),
+		}
+		s := runResponse(t, p, res, raw)
+		for _, want := range []string{`"big": 9007199254740993`, `"price": 1.10`, `"exp": 1e5`} {
+			if !strings.Contains(s, want) {
+				t.Fatalf("dump lost the literal %q:\n%s", want, s)
+			}
+		}
+		// key order must be the original one (big before price)
+		ib, ip := strings.Index(s, `"big"`), strings.Index(s, `"price"`)
+		if ib < 0 || ip < 0 || ib > ip {
+			t.Fatalf("key order not preserved:\n%s", s)
+		}
+	})
+	t.Run("streaming", func(t *testing.T) {
+		p := &Policy{respSavePath: t.TempDir()}
+		sse := "data: {\"created\":9007199254740993,\"choices\":[{\"delta\":{\"content\":\"hi\"},\"index\":0,\"finish_reason\":null}]}\n\n" +
+			"data: [DONE]\n\n"
+		res := &http.Response{
+			StatusCode: 200,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}
+		s := runResponse(t, p, res, sse)
+		if !strings.Contains(s, `"created": 9007199254740993`) {
+			t.Fatalf("dump lost the big integer literal:\n%s", s)
+		}
+	})
 }
 
 // no respSavePath: TapResponse must leave the body untouched

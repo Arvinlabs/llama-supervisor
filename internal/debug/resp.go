@@ -25,8 +25,12 @@ import (
 //     stream that does not look like a chat completion falls back to the JSON array of the
 //     SSE data events (each data line: parsed as JSON when valid, kept as the raw string
 //     otherwise, e.g. [DONE]),
-//   - a non-streaming body is stored as the parsed JSON when valid, base64-encoded otherwise.
+//   - a non-streaming body is stored as the raw JSON bytes when valid - byte-identical to
+//     what the backend sent (original key order, original number literals, no precision
+//     loss), only re-indented - base64-encoded otherwise.
 //
+// Streaming chunks are decoded with UseNumber, so the numbers in the assembled body keep
+// their original literals too (no float64 round-trip).
 // In either case the dump stays a single JSON document.
 // The wrapped body passes every byte through untouched, so the client sees the response
 // exactly as the backend sent it. An early close on a canceled request leaves a partial
@@ -98,12 +102,12 @@ func (b *teeResponse) Close() error {
 
 // responseDump is the on-disk dump: the status line, the headers, and the body - the
 // non-streaming structure assembled from the stream chunks when streaming (or the raw SSE
-// events when the stream is not a chat completion), the parsed JSON body otherwise
+// events when the stream is not a chat completion), the raw JSON bytes otherwise
 type responseDump struct {
 	Status  string      `json:"status"`
 	Header  http.Header `json:"headers"`
 	Stream  bool        `json:"stream"`
-	Body    any         `json:"body,omitempty"`       // the parsed JSON body (stream: assembled)
+	Body    any         `json:"body,omitempty"`       // the raw JSON body (stream: assembled)
 	Events  []any       `json:"events,omitempty"`     // streaming, non-completion: one entry per SSE data line
 	BodyB64 string      `json:"bodyBase64,omitempty"` // non-streaming body that is not valid JSON
 }
@@ -121,9 +125,9 @@ func (b *teeResponse) dump() error {
 			dump.Events = events // not a chat completion stream (or no chunks at all): keep the raw events
 		}
 	case len(data) > 0 && json.Valid(data):
-		if err := json.Unmarshal(data, &dump.Body); err != nil {
-			dump.BodyB64 = base64.StdEncoding.EncodeToString(data)
-		}
+		// RawMessage is emitted verbatim by the encoder: the body stays byte-identical to
+		// the backend output (key order and number literals included), only re-indented
+		dump.Body = json.RawMessage(data)
 	default:
 		if len(data) > 0 {
 			dump.BodyB64 = base64.StdEncoding.EncodeToString(data)
@@ -196,12 +200,12 @@ func assembleCompletion(events []any) (any, bool) {
 			if !ok {
 				continue
 			}
-			idx, _ := cm["index"].(float64)
-			m, exists := choices[int(idx)]
+			ci := intKey(cm["index"])
+			m, exists := choices[ci]
 			if !exists {
 				m = &mergedChoice{message: map[string]any{}}
-				choices[int(idx)] = m
-				order = append(order, int(idx))
+				choices[ci] = m
+				order = append(order, ci)
 			}
 			delta, _ := cm["delta"].(map[string]any)
 			for _, k := range []string{"role", "content", "reasoning_content"} {
@@ -221,8 +225,8 @@ func assembleCompletion(events []any) (any, bool) {
 				if !ok {
 					continue
 				}
-				ti, _ := tcm["index"].(float64)
-				mt, ok := m.toolCalls[int(ti)]
+				ti := intKey(tcm["index"])
+				mt, ok := m.toolCalls[ti]
 				if !ok {
 					if m.toolCalls == nil {
 						m.toolCalls = map[int]*mergedToolCall{}
@@ -299,6 +303,22 @@ func assembleCompletion(events []any) (any, bool) {
 	return out, true
 }
 
+// intKey extracts a zero-based integer key from a JSON value decoded with UseNumber
+// (json.Number) or with the default decoder (float64); a missing or invalid value yields 0
+func intKey(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(i)
+	}
+	return 0
+}
+
 // parseSSEEvents parses the buffered SSE body into the list of data events: each "data:"
 // line yields one entry - parsed as JSON when the payload is valid JSON, kept as the raw
 // string otherwise (e.g. the terminal [DONE]); the event's non-data fields (id:, event:,
@@ -316,7 +336,11 @@ func parseSSEEvents(data []byte) []any {
 		}
 		if json.Valid([]byte(payload)) {
 			var v any
-			if err := json.Unmarshal([]byte(payload), &v); err == nil {
+			// UseNumber keeps the number literals (stored as json.Number instead of
+			// float64), so re-encoding loses no precision and no literal form
+			dec := json.NewDecoder(strings.NewReader(payload))
+			dec.UseNumber()
+			if err := dec.Decode(&v); err == nil {
 				events = append(events, v)
 				continue
 			}
