@@ -108,6 +108,12 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 				id:     p.hub.StreamStart(stream),
 			}
 		}
+		// backend response dump (no-op when debug.respSavePath is not set): the outermost
+		// wrap, so it sees exactly what the client receives (including an injected stream
+		// error event) and buffers it for the dump when the body is closed
+		if p.debug != nil {
+			p.debug.TapResponse(res)
+		}
 		cb.watch()
 		return nil
 	}

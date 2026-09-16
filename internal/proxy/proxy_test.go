@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
+	"github.com/Arvinlabs/llama-supervisor/internal/debug"
 	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 )
 
@@ -415,6 +416,160 @@ func TestProxySavesOutboundRequestWithoutRequestPolicy(t *testing.T) {
 			t.Fatalf("outbound dump missing %q:\n%s", want, s)
 		}
 	}
+}
+
+// with debug.respSavePath set, the backend response is dumped to a JSON file: the
+// streaming (SSE) body is assembled into the non-streaming structure, the client still
+// receives the stream byte-identical, and non-streaming JSON bodies are stored parsed
+func TestProxySavesBackendResponse(t *testing.T) {
+	t.Run("streaming", func(t *testing.T) {
+		dir := t.TempDir()
+		sse := strings.Join([]string{
+			`data: {"choices":[{"delta":{"role":"assistant","content":"hi"},"index":0,"finish_reason":null}],"id":"chatcmpl-x","model":"m"}` + "\n\n",
+			`data: {"choices":[{"delta":{"content":" there"},"index":0,"finish_reason":null}]}` + "\n\n",
+			`data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"choices":[],"usage":{"prompt_tokens":27,"completion_tokens":240,"total_tokens":267}}` + "\n\n",
+			`data: [DONE]` + "\n\n",
+		}, "")
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte(sse))
+		}))
+		defer backend.Close()
+
+		sup := New(config.Config{Backend: backend.URL, Debug: &config.DebugGroup{Enable: true, RespSavePath: dir}}, context.Background())
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		sup.ServeHTTP(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		if w.Body.String() != sse {
+			t.Fatalf("client did not receive the stream byte-identical:\n%s\n%s", sse, w.Body.String())
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 saved response file, got %d", len(entries))
+		}
+		if !strings.HasSuffix(entries[0].Name(), ".json") {
+			t.Fatalf("file name %q has no .json suffix", entries[0].Name())
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dump struct {
+			Status string      `json:"status"`
+			Header http.Header `json:"headers"`
+			Stream bool        `json:"stream"`
+			Body   any         `json:"body"`
+			Events []any       `json:"events"`
+		}
+		if err := json.Unmarshal(data, &dump); err != nil {
+			t.Fatalf("dump is not valid JSON: %v\n%s", err, data)
+		}
+		if dump.Status != "200 OK" || !dump.Stream {
+			t.Fatalf("unexpected dump: %s", data)
+		}
+		if !strings.HasPrefix(dump.Header.Get("Content-Type"), "text/event-stream") {
+			t.Fatalf("dump headers missing the stream content type:\n%s", data)
+		}
+		if dump.Events != nil {
+			t.Fatalf("an assembled dump must not carry raw events:\n%s", data)
+		}
+		// the stream must be assembled into the non-streaming structure: the deltas merged
+		// into one message, the finish_reason from the terminating chunk, the usage kept
+		b, ok := dump.Body.(map[string]any)
+		if !ok {
+			t.Fatalf("body not an object:\n%s", data)
+		}
+		if b["object"] != "chat.completion" || b["id"] != "chatcmpl-x" || b["model"] != "m" {
+			t.Fatalf("envelope not merged:\n%s", data)
+		}
+		chs, _ := b["choices"].([]any)
+		if len(chs) != 1 {
+			t.Fatalf("want 1 choice, got %d:\n%s", len(chs), data)
+		}
+		c, _ := chs[0].(map[string]any)
+		msg, _ := c["message"].(map[string]any)
+		if c["finish_reason"] != "stop" || msg["role"] != "assistant" || msg["content"] != "hi there" {
+			t.Fatalf("choice not assembled:\n%s", data)
+		}
+		usage, _ := b["usage"].(map[string]any)
+		if usage["total_tokens"] != float64(267) {
+			t.Fatalf("usage not merged:\n%s", data)
+		}
+	})
+	t.Run("non-streaming", func(t *testing.T) {
+		dir := t.TempDir()
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true}`))
+		}))
+		defer backend.Close()
+
+		sup := New(config.Config{Backend: backend.URL, Debug: &config.DebugGroup{Enable: true, RespSavePath: dir}}, context.Background())
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[]}`))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		sup.ServeHTTP(w, r)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d", w.Code)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("expected 1 saved response file, got %d", len(entries))
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dump struct {
+			Stream bool  `json:"stream"`
+			Body   any   `json:"body"`
+			Events []any `json:"events"`
+		}
+		if err := json.Unmarshal(data, &dump); err != nil {
+			t.Fatalf("dump is not valid JSON: %v\n%s", err, data)
+		}
+		if dump.Stream || dump.Events != nil {
+			t.Fatalf("non-streaming dump must not carry events:\n%s", data)
+		}
+		obj, ok := dump.Body.(map[string]any)
+		if !ok || obj["ok"] != true {
+			t.Fatalf("body not stored parsed:\n%s", data)
+		}
+	})
+}
+
+// debug disabled or respSavePath empty: the backend response body is left untouched
+func TestProxyNoResponseSaveWithoutConfig(t *testing.T) {
+	t.Run("debug disabled, respSavePath ignored", func(t *testing.T) {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"ok":true}`))
+		}))
+		defer backend.Close()
+		sup := New(config.Config{Backend: backend.URL, Debug: &config.DebugGroup{Enable: false, RespSavePath: t.TempDir()}}, context.Background())
+		sup.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	})
+	t.Run("debug enabled, respSavePath empty", func(t *testing.T) {
+		p := &debug.Policy{}
+		inner := io.NopCloser(strings.NewReader("x"))
+		res := &http.Response{Body: inner}
+		p.TapResponse(res)
+		if res.Body != inner {
+			t.Fatal("body was replaced, want the original body untouched")
+		}
+	})
 }
 
 // obsRecorder collects observations delivered by the hub (a test consumer)

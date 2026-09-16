@@ -116,6 +116,9 @@ func main() {
 		if d.OutSavePath != "" {
 			log.Print("[config] debug: saving outbound proxied requests to " + d.OutSavePath)
 		}
+		if d.RespSavePath != "" {
+			log.Print("[config] debug: saving backend responses to " + d.RespSavePath)
+		}
 	} else {
 		log.Print("[config] debug disabled")
 	}

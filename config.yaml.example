@@ -104,6 +104,14 @@ debug:
   # policy has rewritten it, when request.enable is true) using the same plain text format as
   # savePath; empty disables saving
   outSavePath: ""
+  # when debug is enabled: directory to dump every backend response to as a JSON file named by
+  # the response time (YYYYMMDD_HHMMSS.mmm.json): the status line, the headers and the body -
+  # a non-streaming body is stored as the parsed JSON (base64-encoded when not valid JSON),
+  # a streaming (SSE) chat completion is assembled into the same non-streaming structure
+  # (the per-chunk deltas merged into one message, usage/timings taken from the final chunk);
+  # a stream that is not a chat completion falls back to a JSON array of the data events
+  # (JSON payloads parsed, others kept as raw strings, e.g. [DONE]); empty disables saving
+  respSavePath: ""
 
 # ===== request policy config: enabled when enable is true =====
 request:

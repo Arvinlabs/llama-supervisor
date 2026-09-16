@@ -22,16 +22,20 @@ const DefaultDebugPath = "/debug/command"
 // It also carries the request dump feature: when SavePath is set, every request passed to Tap is
 // saved to a plain text file named by the request time (inbound requests, debug.savePath); when
 // OutSavePath is set, every request passed to TapOutbound is saved the same way (outbound
-// requests, debug.outSavePath). Both are for later inspection and replay.
+// requests, debug.outSavePath); when RespSavePath is set, every backend response passed to
+// TapResponse is saved as a JSON file (debug.respSavePath), with streaming (SSE) chat
+// completions assembled into the non-streaming structure. All are for later inspection and
+// replay.
 type Policy struct {
-	path        string
-	command     string
-	savePath    string
-	outSavePath string
+	path         string
+	command      string
+	savePath     string
+	outSavePath  string
+	respSavePath string
 }
 
 func New(g *config.DebugGroup) *Policy {
-	p := &Policy{command: g.Command, savePath: g.SavePath, outSavePath: g.OutSavePath}
+	p := &Policy{command: g.Command, savePath: g.SavePath, outSavePath: g.OutSavePath, respSavePath: g.RespSavePath}
 	if g.Path != "" {
 		p.path = g.Path
 	} else {

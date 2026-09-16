@@ -79,6 +79,12 @@ type DebugGroup struct {
 	// policy has rewritten it, when enabled) are dumped to as plain text files named by the request
 	// time; empty disables saving
 	OutSavePath string `yaml:"outSavePath"`
+	// RespSavePath when debug is enabled, directory the backend responses are dumped to as JSON
+	// files named by the response time: non-streaming bodies are stored as the parsed JSON (or
+	// base64-encoded when not valid JSON), streaming (SSE) chat completions are assembled into
+	// the non-streaming structure (deltas merged into one message, usage/timings from the final
+	// chunk); empty disables saving
+	RespSavePath string `yaml:"respSavePath"`
 }
 
 func (g *DebugGroup) Enabled() bool {
