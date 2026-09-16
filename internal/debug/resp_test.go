@@ -58,6 +58,55 @@ func TestAssembleCompletion(t *testing.T) {
 	}
 }
 
+// assembleCompletion merges the tool_calls deltas: id/type arrive in the first fragment,
+// the name/arguments strings accumulate per call index (parallel calls interleaved)
+func TestAssembleToolCalls(t *testing.T) {
+	events := parseSSEEvents([]byte(
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_","arguments":""}}]},"finish_reason":null}]}` + "\n\n" +
+			`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"weather","arguments":"{\"lo"}},{"index":1,"id":"call_2","type":"function","function":{"name":"get_","arguments":""}}]},"finish_reason":null}]}` + "\n\n" +
+			`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"cation\":\"SF\"}"}}]},"finish_reason":null}]}` + "\n\n" +
+			`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"name":"time","arguments":"{\"zone\":\"UTC\"}"}}]},"finish_reason":null}]}` + "\n\n" +
+			`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n" +
+			`data: [DONE]` + "\n\n",
+	))
+	out, ok := assembleCompletion(events)
+	if !ok {
+		t.Fatal("want the assembled completion")
+	}
+	m, _ := out.(map[string]any)
+	chs, _ := m["choices"].([]any)
+	if len(chs) != 1 {
+		t.Fatalf("want 1 choice, got %d", len(chs))
+	}
+	c, _ := chs[0].(map[string]any)
+	if c["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %v", c["finish_reason"])
+	}
+	msg, _ := c["message"].(map[string]any)
+	if msg["role"] != "assistant" {
+		t.Fatalf("role not merged: %v", msg)
+	}
+	if _, ok := msg["content"]; ok {
+		t.Fatalf("a null content must not be set: %v", msg)
+	}
+	tcs, _ := msg["tool_calls"].([]any)
+	if len(tcs) != 2 {
+		t.Fatalf("want 2 tool calls, got %d: %v", len(tcs), msg)
+	}
+	wants := [][3]string{
+		{"call_1", "get_weather", `{"location":"SF"}`},
+		{"call_2", "get_time", `{"zone":"UTC"}`},
+	}
+	for i, want := range wants {
+		tc, _ := tcs[i].(map[string]any)
+		fn, _ := tc["function"].(map[string]any)
+		if tc["id"] != want[0] || tc["type"] != "function" || tc["index"] != float64(i) ||
+			fn["name"] != want[1] || fn["arguments"] != want[2] {
+			t.Fatalf("tool call %d not merged: %v", i, tc)
+		}
+	}
+}
+
 // parseSSEEvents: JSON payloads are parsed, non-JSON payloads (e.g. [DONE]) are kept as
 // raw strings, non-data lines (comments, other fields) are skipped
 func TestParseSSEEvents(t *testing.T) {

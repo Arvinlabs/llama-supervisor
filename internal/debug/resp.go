@@ -137,13 +137,24 @@ func (b *teeResponse) dump() error {
 // assembleCompletion merges the SSE chunks of a streaming chat completion into the
 // non-streaming structure: the envelope (id/created/model/system_fingerprint) comes from
 // the first chunk, each choice's delta fields (role/content/reasoning_content) are
-// concatenated into one message and its finish_reason taken from the terminating chunk,
-// and usage/timings come from the final usage chunk. The stream must carry at least one
-// chunk with at least one choice, otherwise (false) is returned and the caller keeps the
-// raw events
+// concatenated into one message, its tool_calls deltas (id/type kept, name/arguments
+// string fragments concatenated per call index) are merged into the message's tool_calls,
+// the finish_reason is taken from the terminating chunk, and usage/timings come from the
+// final usage chunk. The stream must carry at least one chunk with at least one choice,
+// otherwise (false) is returned and the caller keeps the raw events
 func assembleCompletion(events []any) (any, bool) {
+	type mergedToolCall struct {
+		id     string
+		name   string
+		args   string
+		hasID  bool
+		hasTyp bool
+		typ    string
+	}
 	type mergedChoice struct {
 		message   map[string]any
+		toolCalls map[int]*mergedToolCall
+		tcOrder   []int
 		finish    any
 		hasFinish bool
 	}
@@ -199,6 +210,39 @@ func assembleCompletion(events []any) (any, bool) {
 					}
 				}
 			}
+			// the tool_calls delta: parallel calls are keyed by their own index; id/type
+			// arrive in the first fragment and the name/arguments strings accumulate
+			list, _ := delta["tool_calls"].([]any)
+			for _, tc := range list {
+				tcm, ok := tc.(map[string]any)
+				if !ok {
+					continue
+				}
+				ti, _ := tcm["index"].(float64)
+				mt, ok := m.toolCalls[int(ti)]
+				if !ok {
+					if m.toolCalls == nil {
+						m.toolCalls = map[int]*mergedToolCall{}
+					}
+					mt = &mergedToolCall{}
+					m.toolCalls[int(ti)] = mt
+					m.tcOrder = append(m.tcOrder, int(ti))
+				}
+				if s, ok := tcm["id"].(string); ok && s != "" {
+					mt.id, mt.hasID = s, true
+				}
+				if s, ok := tcm["type"].(string); ok && s != "" {
+					mt.typ, mt.hasTyp = s, true
+				}
+				if fn, ok := tcm["function"].(map[string]any); ok {
+					if s, ok := fn["name"].(string); ok {
+						mt.name += s
+					}
+					if s, ok := fn["arguments"].(string); ok {
+						mt.args += s
+					}
+				}
+			}
 			if fr, ok := cm["finish_reason"]; ok && fr != nil {
 				m.finish, m.hasFinish = fr, true
 			}
@@ -214,6 +258,28 @@ func assembleCompletion(events []any) (any, bool) {
 	merged := make([]any, 0, len(order))
 	for _, i := range order {
 		m := choices[i]
+		if len(m.tcOrder) > 0 {
+			tcs := make([]any, 0, len(m.tcOrder))
+			for _, ti := range m.tcOrder {
+				mt := m.toolCalls[ti]
+				fn := map[string]any{}
+				if mt.name != "" {
+					fn["name"] = mt.name
+				}
+				if mt.args != "" {
+					fn["arguments"] = mt.args
+				}
+				tc := map[string]any{"index": float64(ti), "function": fn}
+				if mt.hasID {
+					tc["id"] = mt.id
+				}
+				if mt.hasTyp {
+					tc["type"] = mt.typ
+				}
+				tcs = append(tcs, tc)
+			}
+			m.message["tool_calls"] = tcs
+		}
 		c := map[string]any{"index": float64(i), "message": m.message}
 		if m.hasFinish {
 			c["finish_reason"] = m.finish
