@@ -131,6 +131,9 @@ func (b *teeResponse) dump() error {
 	}
 	enc := json.NewEncoder(b.f)
 	enc.SetIndent("", "  ")
+	// the dump is for human inspection: keep &, < and > literal instead of the
+	// default \u0026/\u003c/\u003e HTML escapes
+	enc.SetEscapeHTML(false)
 	return enc.Encode(dump)
 }
 

@@ -294,6 +294,28 @@ func TestTapResponseNonStream(t *testing.T) {
 	})
 }
 
+// the dump keeps &, < and > literal (no HTML \u0026-style escapes) for readability
+func TestTapResponseNoHTMLEscapes(t *testing.T) {
+	p := &Policy{respSavePath: t.TempDir()}
+	sse := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"cmd\",\"arguments\":\"{\\\"command\\\":\\\"a && b < c > d\\\"}\"}}]},\"index\":0}]}\n\n" +
+		"data: [DONE]\n\n"
+	res := &http.Response{
+		StatusCode: 200,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+	s := runResponse(t, p, res, sse)
+	for _, want := range []string{"a && b < c > d"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("dump missing literal %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, `\u0026`) || strings.Contains(s, `\u003c`) || strings.Contains(s, `\u003e`) {
+		t.Fatalf("dump contains HTML escapes:\n%s", s)
+	}
+}
+
 // no respSavePath: TapResponse must leave the body untouched
 func TestTapResponseNoop(t *testing.T) {
 	p := &Policy{}
