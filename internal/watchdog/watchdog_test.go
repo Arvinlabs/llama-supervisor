@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -385,9 +386,79 @@ func TestWatchdogLoopUnknownTriggers(t *testing.T) {
 	}
 }
 
+// hardRepeat: a streaming run of identical runes reaching hardRepeat triggers directly,
+// without any over-speed sample (the loop may decode at a normal speed below maxRate)
+func TestWatchdogHardRepeatTriggers(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, HardRepeat: 5, Command: ""}, "http://127.0.0.1:1", "")
+	id := 0
+	p.OnStreamStart(id, true)
+	p.OnStreamContent(id, "aaa") // run 3 < 5, no trigger
+	if p.paused() {
+		t.Fatal("a run below hardRepeat must not trigger")
+	}
+	p.OnStreamContent(id, "aa") // run reaches 5 -> trigger (runs in a goroutine)
+	expectPaused(t, p)
+	p.OnStreamEnd(id)
+}
+
+// hardRepeat is detected exactly once per run: a run already at the threshold keeps growing
+// without re-triggering (and the watchdog is paused anyway after the first trigger)
+func TestWatchdogHardRepeatOncePerRun(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, HardRepeat: 3, Command: ""}, "http://127.0.0.1:1", "")
+	id := 0
+	p.OnStreamStart(id, true)
+	p.OnStreamContent(id, "///") // run reaches 3 -> trigger
+	expectPaused(t, p)
+	until := p.pauseUntilEnd()
+	p.OnStreamContent(id, "////") // run 4..7: no crossing, no re-trigger, pause not extended
+	if !p.pauseUntilEnd().Equal(until) {
+		t.Fatal("a run already past hardRepeat must not re-trigger or extend the pause")
+	}
+	p.OnStreamEnd(id)
+}
+
+// hardRepeat <= 0 disables the independent check: even a very long run never triggers by itself
+func TestWatchdogHardRepeatDisabled(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, HardRepeat: -1, Command: ""}, "http://127.0.0.1:1", "")
+	id := 0
+	p.OnStreamStart(id, true)
+	p.OnStreamContent(id, strings.Repeat("a", 500))
+	time.Sleep(50 * time.Millisecond) // give a (nonexistent) trigger goroutine a chance to run
+	if p.paused() {
+		t.Fatal("a disabled hardRepeat must not trigger")
+	}
+	p.OnStreamEnd(id)
+}
+
+// the degenerate mark expires: RepeatLimit consecutive runes that do not extend a counted
+// run clear it, so an early legitimate run (a markdown divider) cannot poison a later,
+// unrelated over-speed judgment; a short jitter (a loop broken by one rune) does not clear it
+func TestWatchdogDegenerateExpires(t *testing.T) {
+	p := New(&config.WatchdogGroup{Enable: true, RepeatLimit: 3, HardRepeat: 0, Command: ""}, "http://127.0.0.1:1", "")
+	id := 0
+	p.OnStreamStart(id, true)
+	p.OnStreamContent(id, "###") // run 3 -> degenerate
+	if !p.streams[id].degenerate {
+		t.Fatal("expected degenerate after a run reaching the limit")
+	}
+	p.OnStreamContent(id, "hello") // 5 consecutive non-extending runes -> cleared
+	if p.streams[id].degenerate {
+		t.Fatal("a degenerate mark must expire after a non-repeating stretch of RepeatLimit")
+	}
+	p.OnStreamContent(id, "###") // degenerate again
+	if !p.streams[id].degenerate {
+		t.Fatal("expected degenerate again")
+	}
+	p.OnStreamContent(id, "x") // clean 1 < 3: a single jitter rune must not clear the mark
+	if !p.streams[id].degenerate {
+		t.Fatal("a single jitter rune must not clear the degenerate mark")
+	}
+	p.OnStreamEnd(id)
+}
+
 func TestBuildWatchdogConfigDefaults(t *testing.T) {
 	wc := BuildWatchdogConfig(&config.WatchdogGroup{Enable: true})
-	if wc.Interval != 2*time.Second || wc.MaxRate != 300 || wc.Times != 2 || wc.Pause != 30*time.Second || wc.Command != "" || wc.Verbose {
+	if wc.Interval != 2*time.Second || wc.MaxRate != 300 || wc.Times != 2 || wc.Pause != 30*time.Second || wc.Command != "" || wc.Verbose || wc.HardRepeat != 100 {
 		t.Fatalf("unexpected defaults: %+v", wc)
 	}
 }
@@ -522,8 +593,16 @@ func TestBuildWatchdogConfigRepeatLimit(t *testing.T) {
 	if wc.RepeatLimit != 10 {
 		t.Fatalf("unexpected repeatLimit default: %d", wc.RepeatLimit)
 	}
-	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, RepeatLimit: 8})
-	if wc.RepeatLimit != 8 {
-		t.Fatalf("unexpected repeatLimit override: %d", wc.RepeatLimit)
+	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, RepeatLimit: 8, HardRepeat: 50})
+	if wc.RepeatLimit != 8 || wc.HardRepeat != 50 {
+		t.Fatalf("unexpected repeatLimit/hardRepeat overrides: %+v", wc)
+	}
+	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, HardRepeat: 0})
+	if wc.HardRepeat != 100 {
+		t.Fatalf("an unset hardRepeat must keep the default, got %d", wc.HardRepeat)
+	}
+	wc = BuildWatchdogConfig(&config.WatchdogGroup{Enable: true, HardRepeat: -1})
+	if wc.HardRepeat != 0 {
+		t.Fatalf("a negative hardRepeat must disable the check, got %d", wc.HardRepeat)
 	}
 }

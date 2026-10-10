@@ -42,7 +42,12 @@ type Config struct {
 	// RepeatChars is the whitelist of runes whose consecutive repetition counts as a dead
 	// loop; empty means any rune counts
 	RepeatChars string
-	repeatSet   map[rune]bool // built from RepeatChars; nil means any rune counts
+	// HardRepeat is the run of identical tail runes in a streaming completion's generated
+	// content that triggers on its own, without any over-speed: a model can also degenerate
+	// into a loop that decodes at a normal speed that never crosses MaxRate. Default 100,
+	// a configured value <= 0 disables the check
+	HardRepeat int
+	repeatSet  map[rune]bool // built from RepeatChars; nil means any rune counts
 }
 
 // countsRepeat reports whether a rune's consecutive repetition counts as a dead loop:
@@ -63,6 +68,7 @@ func BuildWatchdogConfig(g *config.WatchdogGroup) Config {
 		MinDraftRate: g.MinDraftRate, // 0 (unset) disables the draft-acceptance check
 		DraftTimes:   10,
 		RepeatLimit:  10,
+		HardRepeat:   100,
 	}
 	if g.Interval > 0 {
 		wc.Interval = time.Duration(g.Interval) * time.Second
@@ -82,6 +88,12 @@ func BuildWatchdogConfig(g *config.WatchdogGroup) Config {
 	if g.RepeatLimit > 0 {
 		wc.RepeatLimit = g.RepeatLimit
 	}
+	switch {
+	case g.HardRepeat < 0:
+		wc.HardRepeat = 0 // explicitly disabled
+	case g.HardRepeat > 0:
+		wc.HardRepeat = g.HardRepeat
+	} // 0 (unset) keeps the default
 	wc.RepeatChars = g.RepeatChars
 	if g.RepeatChars != "" {
 		wc.repeatSet = make(map[rune]bool)
@@ -113,7 +125,8 @@ type streamState struct {
 	stream     bool // whether the response is a stream
 	lastRune   rune // last generated rune
 	run        int  // length of the trailing run of that rune (across content pieces)
-	degenerate bool // sticky: the generated content fell into a repeated-rune dead loop
+	clean      int  // consecutive runes that did not extend a counted run; a stretch of RepeatLimit clears the degenerate mark
+	degenerate bool // the generated content is (or was, recently) in a repeated-rune dead loop
 }
 
 // firstProbeDelay is the fixed delay between a request arriving and the first /slots fetch;
@@ -413,24 +426,46 @@ func (w *Policy) OnStreamStart(id int, stream bool) {
 // OnStreamContent feeds one piece of generated content (content and reasoning_content) of
 // one streaming completion; the over-speed monitor marks the stream degenerate once its
 // tail keeps the same whitelisted rune (repeatChars; any rune when empty) for RepeatLimit in
-// a row (a typical dead loop, e.g. "////"); a rune that is not counted also breaks the run
+// a row (a typical dead loop, e.g. "////"); a rune that is not counted also breaks the run.
+// The degenerate mark is not sticky forever: RepeatLimit consecutive runes that do not
+// extend a counted run clear it, so an early legitimate run (a markdown divider, "......")
+// cannot poison a later, unrelated over-speed judgment. A run reaching HardRepeat triggers
+// directly, without any over-speed (the loop may decode at a normal speed); like the draft
+// check it runs the command in a goroutine (this runs on the proxy's per-request copy path
+// and must not block the client), and is skipped while the watchdog is paused
 func (w *Policy) OnStreamContent(id int, content string) {
 	w.mu.Lock()
+	hardTrigger := false
+	var hardRune rune
 	if s, ok := w.streams[id]; ok {
 		for _, r := range content {
 			counted := w.countsRepeat(r)
 			if counted && r == s.lastRune {
 				s.run++
+				s.clean = 0
 			} else {
 				s.lastRune = r
 				s.run = 1
+				s.clean++
 			}
 			if !s.degenerate && counted && s.run >= w.config.RepeatLimit {
 				s.degenerate = true
 			}
+			if s.degenerate && s.clean >= w.config.RepeatLimit {
+				s.degenerate = false
+			}
+			// the crossing is detected exactly once per run (the run grows by one per rune)
+			if !hardTrigger && w.config.HardRepeat > 0 && counted && s.run == w.config.HardRepeat {
+				hardTrigger = true
+				hardRune = r
+			}
 		}
 	}
 	w.mu.Unlock()
+	if hardTrigger && !w.paused() {
+		go w.trigger(context.Background(), fmt.Sprintf("content dead loop: rune %q repeated %d in a row (hardRepeat, no over-speed needed)",
+			hardRune, w.config.HardRepeat))
+	}
 }
 
 // OnStreamEnd unregisters the in-flight /v1/chat/completions response

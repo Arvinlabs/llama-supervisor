@@ -71,6 +71,10 @@ watchdog:
   # whitelist: only these characters' consecutive repetition counts as a dead loop; empty
   # (default) means any character
   repeatChars: ""
+  # independent dead-loop trigger: a streaming run of this many identical tail runes triggers
+  # directly, without any over-speed (a model can also loop at a speed that never crosses
+  # maxRate). Default 100, a value <= 0 disables
+  hardRepeat: 100
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 

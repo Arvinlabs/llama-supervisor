@@ -62,7 +62,11 @@ type WatchdogGroup struct {
 	// RepeatChars whitelist: only these characters' consecutive repetition counts as a dead
 	// loop; empty (default) means any character
 	RepeatChars string `yaml:"repeatChars"`
-	Command     string `yaml:"command"` // shell command run after declaring unhealthy
+	// HardRepeat consecutive identical tail runes in a streaming completion's generated
+	// content that trigger on their own, without any over-speed (a model can also loop at a
+	// speed that never crosses maxRate). Default 100, a configured value <= 0 disables
+	HardRepeat int    `yaml:"hardRepeat"`
+	Command    string `yaml:"command"` // shell command run after declaring unhealthy
 }
 
 func (g *WatchdogGroup) Enabled() bool {
