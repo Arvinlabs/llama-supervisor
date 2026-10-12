@@ -39,7 +39,6 @@ type Handler struct {
 // New builds the handler; selfURL must be the supervisor's own listen address on
 // the loopback interface
 func New(selfURL string, modelMap map[string]string) *Handler {
-	registerMediaResolver()
 	// no client-level timeout: a generation can run arbitrarily long; the request
 	// context (canceled on client disconnect) bounds the call
 	return &Handler{

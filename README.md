@@ -130,7 +130,7 @@ Notes:
 
 - The handler does no auth of its own: the client's key (`x-api-key` header, or the `Authorization` header verbatim) is passed through to the self request, so the internal pipeline's request policy (`request.virtualKeys`) is the single authentication point for both protocols; upstream failures are mapped to Anthropic error shapes (`{"type":"error","error":{...}}`), 5xx → 500.
 - The pipeline's injected stream error event (abnormal stream end) is relayed to the client as an Anthropic `event: error`, and a stream that ends without a terminal chunk is closed with a synthesized `message_delta` + `message_stop` so clients never hang.
-- Tools, tool results, images (inline base64 and data URLs; http(s) URLs are downloaded up to 20 MB) and usage (input / cache / output tokens) are carried across; protocol-unique fields that cannot be expressed on the other side are dropped with a logged diagnostic.
+- Tools, tool results, images (inline base64 becomes a data URL, URL sources pass through) and usage (input / cache / output tokens) are carried across; protocol-unique fields that cannot be expressed on the other side are dropped with a logged diagnostic.
 
 ### stats
 
