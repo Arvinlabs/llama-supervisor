@@ -3,7 +3,7 @@
 Go reverse proxy that sits in front of a local llama.cpp server (`host:port` → `backend`) and turns it into an always-on, self-healing OpenAI-compatible service. A local model is one big process: it can hang, degenerate into a repeating output loop, or need a restart after being idle. The supervisor watches for that and takes care of it, while also acting as a small gateway layer for whoever calls the model. Use it for:
 
 - **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, and `watchdog` catches an output loop (speed far above normal — judged against the live generated content of streaming responses before acting — or the live content alone falling into a long repeated run) or a degenerate MTP draft acceptance rate — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
-- **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), and `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens).
+- **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens), and `anthropic` exposes the same backend through the Anthropic Messages API (`/v1/messages`) for clients like Claude Code.
 - **knowing what the model costs**: `stats` records per-day token usage (input / input cache / output / total) of `/v1/chat/completions` into one JSON file per day.
 - **seeing and poking what is going on**: `debug` provides a manual command endpoint and dumps inbound/outbound requests to disk.
 
@@ -116,6 +116,21 @@ Request policy with two independent sub-features (each only takes effect when `r
 | `request.enable` | whether the request policy is enabled, default `false`; sub-features only take effect when it is true |
 | `request.virtualKeys` | virtual API key list, default empty (sub-feature off). When non-empty, proxied requests must carry one of the keys; missing or unknown keys are rejected with an OpenAI-format 401 error. Accepted requests are re-signed with the global `apiKey`, which never sees the virtual keys |
 | `request.prefixCache` | prefix cache, default `false`. When enabled, `/v1/chat/completions` request bodies are normalized before proxying: only the top-level `tools` list is touched — sorted by tool name (`function.name` / `custom.name` per the OpenAI spec, canonical-byte tiebreak), and every element is re-encoded in canonical form (object keys sorted at all levels, numbers in shortest form `1.0` -> `1`, no HTML escaping), so semantically identical tools lists in any key order / number literal / whitespace yield one canonical array; every byte outside the tools array is passed through exactly as the client sent it. A tools array with invalid UTF-8 is passed through unchanged |
+
+### anthropic
+
+Anthropic Messages API support: when enabled, the supervisor accepts `POST /v1/messages` on top of the OpenAI pipeline. The request is translated to the OpenAI chat completion protocol at the outer edge (via the [relaykit](https://github.com/QuantumNous/new-api/tree/main/relaykit) conversion library) and proxied to the supervisor **itself**, so the loopback request runs the full, unmodified OpenAI pipeline — auth, request policy, usage injection, stats observation, watchdog, debug dumps. The OpenAI response (plain JSON or SSE) is translated back to the Anthropic protocol before it reaches the client: non-streaming responses become a single `message` object, streams become the `message_start` / `content_block_*` / `message_delta` / `message_stop` SSE event sequence.
+
+| Field | Description |
+|---|---|
+| `anthropic.enable` | whether the Anthropic protocol is enabled, default `false` |
+| `anthropic.modelMap` | optional client model name → backend model name remapping, default empty; unmapped names pass through to the backend unchanged |
+
+Notes:
+
+- The handler does no auth of its own: the client's key (`x-api-key` header, or the `Authorization` header verbatim) is passed through to the self request, so the internal pipeline's request policy (`request.virtualKeys`) is the single authentication point for both protocols; upstream failures are mapped to Anthropic error shapes (`{"type":"error","error":{...}}`), 5xx → 500.
+- The pipeline's injected stream error event (abnormal stream end) is relayed to the client as an Anthropic `event: error`, and a stream that ends without a terminal chunk is closed with a synthesized `message_delta` + `message_stop` so clients never hang.
+- Tools, tool results, images (inline base64 and data URLs; http(s) URLs are downloaded up to 20 MB) and usage (input / cache / output tokens) are carried across; protocol-unique fields that cannot be expressed on the other side are dropped with a logged diagnostic.
 
 ### stats
 

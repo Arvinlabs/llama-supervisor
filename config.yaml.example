@@ -131,3 +131,18 @@ request:
   # name, sort all JSON object keys recursively) so semantically identical requests share one
   # canonical byte form and the backend prefix cache hits
   prefixCache: true
+
+# ===== anthropic protocol support config: enabled when enable is true =====
+# when enabled the supervisor accepts the Anthropic Messages API at POST /v1/messages:
+# the request is translated to the OpenAI chat completion protocol at the outer edge and
+# proxied to the supervisor itself, so the full OpenAI pipeline (auth, request policy,
+# usage injection, stats, watchdog) runs unmodified, and the OpenAI response (JSON or SSE)
+# is translated back to the Anthropic protocol for the client. The client's API key
+# (x-api-key header, or Authorization verbatim) is passed through to the self request;
+# the request policy is the single authentication point for both protocols
+anthropic:
+  enable: false
+  # optional client model name -> backend model name remapping; unmapped names pass
+  # through to the backend unchanged
+  modelMap:
+    # "claude-sonnet-4-5": "default"

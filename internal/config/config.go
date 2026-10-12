@@ -114,6 +114,22 @@ func (g *RequestGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// AnthropicGroup Anthropic protocol support config; Enable true means the
+// supervisor accepts the Anthropic Messages API at POST /v1/messages: requests
+// are translated to the OpenAI chat completion protocol at the outer edge and
+// proxied to the supervisor itself, so the full OpenAI pipeline (auth, request
+// policy, usage injection, observation, watchdog) runs unmodified internally
+type AnthropicGroup struct {
+	Enable bool `yaml:"enable"` // whether enabled
+	// ModelMap optional client model name -> backend model name remapping;
+	// unmapped names pass through to the backend unchanged
+	ModelMap map[string]string `yaml:"modelMap"`
+}
+
+func (g *AnthropicGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
 // StatsGroup stats policy config; Enable true (and SavePath non-empty) means enabled
 type StatsGroup struct {
 	Enable     bool   `yaml:"enable"`     // whether enabled
@@ -126,17 +142,18 @@ func (g *StatsGroup) Enabled() bool {
 }
 
 type Config struct {
-	Host           string         `yaml:"host"`
-	Port           int            `yaml:"port"`
-	Backend        string         `yaml:"backend"`
-	ApiKey         string         `yaml:"apiKey"` // global backend API key, sent as Bearer <key> on probe and /slots sampling requests; not used by normal proxying
-	StartupCommand string         `yaml:"startupCommand"`
-	Restart        *RestartGroup  `yaml:"restart"`
-	Probe          *ProbeGroup    `yaml:"probe"`
-	Watchdog       *WatchdogGroup `yaml:"watchdog"`
-	Request        *RequestGroup  `yaml:"request"`
-	Stats          *StatsGroup    `yaml:"stats"`
-	Debug          *DebugGroup    `yaml:"debug"`
+	Host           string          `yaml:"host"`
+	Port           int             `yaml:"port"`
+	Backend        string          `yaml:"backend"`
+	ApiKey         string          `yaml:"apiKey"` // global backend API key, sent as Bearer <key> on probe and /slots sampling requests; not used by normal proxying
+	StartupCommand string          `yaml:"startupCommand"`
+	Restart        *RestartGroup   `yaml:"restart"`
+	Probe          *ProbeGroup     `yaml:"probe"`
+	Watchdog       *WatchdogGroup  `yaml:"watchdog"`
+	Request        *RequestGroup   `yaml:"request"`
+	Anthropic      *AnthropicGroup `yaml:"anthropic"`
+	Stats          *StatsGroup     `yaml:"stats"`
+	Debug          *DebugGroup     `yaml:"debug"`
 }
 
 // RestartInterval returns the restart group's idle threshold (configured in seconds)

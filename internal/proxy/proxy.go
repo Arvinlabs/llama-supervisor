@@ -4,13 +4,16 @@ import (
 	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Arvinlabs/llama-supervisor/internal/anthropic"
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
 	"github.com/Arvinlabs/llama-supervisor/internal/debug"
 	"github.com/Arvinlabs/llama-supervisor/internal/observe"
@@ -30,12 +33,13 @@ type Supervisor struct {
 	hub     *observe.Hub // completion observation hub; stats and watchdog subscribe to it
 	observe bool         // whether the completion tap is active (at least one consumer is registered)
 
-	restart  *restart.Policy  // restart policy (nil when restart is disabled)
-	probe    *probe.Policy    // probe policy (nil when probe is disabled)
-	watchdog *watchdog.Policy // watchdog policy (nil when watchdog is disabled)
-	request  *request.Policy  // request policy (nil when no request sub-feature is enabled)
-	stats    *stats.Policy    // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
-	debug    *debug.Policy    // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
+	restart   *restart.Policy    // restart policy (nil when restart is disabled)
+	probe     *probe.Policy      // probe policy (nil when probe is disabled)
+	watchdog  *watchdog.Policy   // watchdog policy (nil when watchdog is disabled)
+	request   *request.Policy    // request policy (nil when no request sub-feature is enabled)
+	stats     *stats.Policy      // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
+	debug     *debug.Policy      // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
+	anthropic *anthropic.Handler // Anthropic /v1/messages handler (nil when the anthropic protocol is disabled)
 }
 
 // New creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -76,6 +80,12 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	}
 	if cfg.Debug.Enabled() {
 		p.debug = debug.New(cfg.Debug)
+	}
+	// the Anthropic handler proxies /v1/messages to the supervisor itself: the
+	// loopback request runs the full OpenAI pipeline above (the client's API key
+	// is passed through, so the inner request policy is the single auth point)
+	if cfg.Anthropic.Enabled() {
+		p.anthropic = anthropic.New(selfBaseURL(cfg.Host, cfg.Port), cfg.Anthropic.ModelMap)
 	}
 	// outbound request dump: the transport taps the request as it is about to be sent, i.e. after
 	// the request policy has rewritten it (when the request policy is enabled)
@@ -142,8 +152,8 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	}
 	// the completion tap is active whenever any consumer (stats or watchdog) subscribed
 	p.observe = p.hub.Len() > 0
-	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.stats == nil && p.debug == nil {
-		log.Print("[config] restart, probe, watchdog, request, stats and debug all disabled, proxying only")
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.anthropic == nil && p.stats == nil && p.debug == nil {
+		log.Print("[config] restart, probe, watchdog, request, anthropic, stats and debug all disabled, proxying only")
 	}
 	return p
 }
@@ -169,6 +179,21 @@ func (p *Supervisor) HandleDebug(w http.ResponseWriter, r *http.Request) bool {
 // and never proxied
 func (p *Supervisor) HandleStats(w http.ResponseWriter, r *http.Request) bool {
 	return p.stats != nil && p.stats.Handle(w, r)
+}
+
+// HandleAnthropic reports whether the request was the Anthropic Messages endpoint
+// (/v1/messages) and, if so, serves it; the endpoint is served by the supervisor
+// itself (via a self request through the OpenAI pipeline) and never proxied
+func (p *Supervisor) HandleAnthropic(w http.ResponseWriter, r *http.Request) bool {
+	return p.anthropic != nil && p.anthropic.Serve(w, r)
+}
+
+// SetSelfURL replaces the Anthropic handler's self request base URL; used by tests
+// that listen on an ephemeral port instead of the configured one
+func (p *Supervisor) SetSelfURL(u string) {
+	if p.anthropic != nil {
+		p.anthropic.SetSelfURL(u)
+	}
 }
 
 // statusRecorder wraps ResponseWriter to record the response status code for the access log
@@ -303,6 +328,17 @@ func (p *Supervisor) StartBackground(ctx context.Context) {
 			}
 		}()
 	}
+}
+
+// selfBaseURL computes the supervisor's own loopback base URL for the Anthropic
+// self requests: the configured host when it is a specific address, the
+// loopback interface otherwise
+func selfBaseURL(host string, port int) string {
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // shouldInjectStreamError reports whether the response is an SSE chat completion stream

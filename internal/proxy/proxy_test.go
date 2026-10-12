@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -937,5 +938,96 @@ func TestProxyTapOffWithoutConsumer(t *testing.T) {
 	sup.ServeHTTP(httptest.NewRecorder(), r)
 	if sawIncludeUsage {
 		t.Fatal("include_usage must not be injected when no consumer observes completions")
+	}
+}
+
+// the anthropic endpoint end to end: a client POST /v1/messages (streaming) is
+// converted to the OpenAI protocol, proxied to the supervisor itself (running
+// the full pipeline), and converted back; the completion must be observed by
+// the stats hub exactly once, through the internal loopback request
+func TestAnthropicEndToEnd(t *testing.T) {
+	var reqs int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reqs, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"default\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer backend.Close()
+
+	cfg := config.Config{
+		Backend:   backend.URL,
+		Request:   &config.RequestGroup{Enable: true, VirtualKeys: []string{"vk-e2e"}},
+		Stats:     &config.StatsGroup{Enable: true, SavePath: t.TempDir()},
+		Anthropic: &config.AnthropicGroup{Enable: true},
+	}
+	sup := New(cfg, context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sup.HandleAnthropic(w, r) {
+			return
+		}
+		sup.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	sup.SetSelfURL(srv.URL)
+
+	body := `{"model":"default","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	// a wrong key is rejected by the internal pipeline's request policy (the
+	// single authentication point) before any backend request is made
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(body))
+	req.Header.Set("x-api-key", "vk-wrong")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong key: status %d, want 401", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&reqs); got != 0 {
+		t.Fatalf("rejected request reached the backend (%d requests)", got)
+	}
+
+	// the correct x-api-key passes through to the inner request policy
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(body))
+	req.Header.Set("x-api-key", "vk-e2e")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{"event: message_start", "event: content_block_start",
+		"event: content_block_delta", "event: content_block_stop", "event: message_delta", "event: message_stop"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in\n%s", want, out)
+		}
+	}
+	if !strings.Contains(string(out), `"text":"hello"`) {
+		t.Errorf("missing generated text in\n%s", out)
+	}
+	if got := atomic.LoadInt32(&reqs); got != 1 {
+		t.Errorf("backend requests = %d, want 1", got)
+	}
+	// the completion must be observed exactly once (via the loopback request),
+	// with the backend-reported usage
+	rec := &obsRecorder{}
+	sup.hub.Register(rec)
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(body))
+	req.Header.Set("x-api-key", "vk-e2e")
+	obsResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, obsResp.Body)
+	obsResp.Body.Close()
+	obs := rec.get()
+	if len(obs) != 1 || obs[0].Total != 7 || obs[0].Prompt != 5 || obs[0].Completion != 2 {
+		t.Fatalf("observations = %+v, want one with total 7 (5+2)", obs)
 	}
 }

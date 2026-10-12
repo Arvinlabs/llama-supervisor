@@ -98,6 +98,11 @@ func main() {
 	} else {
 		log.Print("[config] request disabled")
 	}
+	if cfg.Anthropic.Enabled() {
+		log.Print("[config] anthropic enabled: /v1/messages proxied via the OpenAI pipeline")
+	} else {
+		log.Print("[config] anthropic disabled")
+	}
 	if cfg.Stats.Enabled() {
 		log.Printf("[config] stats enabled: savePath=%s retainDays=%d page=/stats", cfg.Stats.SavePath, config.StatsRetainDays(cfg))
 	} else {
@@ -142,7 +147,7 @@ func main() {
 		// request contexts inherit the root ctx
 		BaseContext: func(net.Listener) context.Context { return ctx },
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if sup.HandleDebug(w, r) || sup.HandleStats(w, r) {
+			if sup.HandleDebug(w, r) || sup.HandleStats(w, r) || sup.HandleAnthropic(w, r) {
 				return
 			}
 			sup.OnHTTPRequest()
