@@ -8,6 +8,14 @@ import (
 	"sync"
 )
 
+// injectedErrorCode tags the error object the supervisor itself injects into a stream
+// that ends abnormally (see streamErrorEvent). It lets observers tell that synthesized
+// event apart from a real backend error payload: an abnormal stream end (backend killed,
+// connection reset) is not a backend error message, so the error guard must not react to
+// it (a dead connection is the watchdog/restart concern, and reacting here would let the
+// guard re-trigger on the very restart it ran).
+const injectedErrorCode = "stream_interrupted"
+
 // streamErrorEvent is the SSE error event injected into streams that end abnormally
 // (backend killed, connection reset, etc.). Clients see a distinct error object in
 // the `data:` field and never receive the usual `[DONE]` marker, so the interruption
@@ -17,7 +25,7 @@ import (
 // when the backend is killed mid-chunk: per the SSE spec it terminates that line into
 // its own (malformed) message event, keeping this error event's data field clean JSON.
 // An empty event is ignored by spec-compliant parsers.
-const streamErrorEvent = "\n\ndata: {\"error\":{\"message\":\"stream interrupted\",\"type\":\"server_error\",\"code\":\"stream_interrupted\"}}\n\n"
+const streamErrorEvent = "\n\ndata: {\"error\":{\"message\":\"stream interrupted\",\"type\":\"server_error\",\"code\":\"" + injectedErrorCode + "\"}}\n\n"
 
 // guardBody wraps the streaming backend response body. When the backend connection
 // ends abnormally mid-stream (Read error) and the client is still connected, it serves

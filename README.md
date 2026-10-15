@@ -2,7 +2,7 @@
 
 Go reverse proxy that sits in front of a local llama.cpp server (`host:port` → `backend`) and turns it into an always-on, self-healing OpenAI-compatible service. A local model is one big process: it can hang, degenerate into a repeating output loop, or need a restart after being idle. The supervisor watches for that and takes care of it, while also acting as a small gateway layer for whoever calls the model. Use it for:
 
-- **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, and `watchdog` catches an output loop (speed far above normal — judged against the live generated content of streaming responses before acting — or the live content alone falling into a long repeated run) or a degenerate MTP draft acceptance rate — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
+- **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, `watchdog` catches an output loop (speed far above normal — judged against the live generated content of streaming responses before acting — or the live content alone falling into a long repeated run) or a degenerate MTP draft acceptance rate, and `errguard` catches a backend fault that surfaces as an OpenAI-style error payload (a stream `data: {"error":{...}}` event or a non-stream `{"error":{...}}` body) whose message matches a configured pattern — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
 - **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens), and `anthropic` exposes the same backend through the Anthropic Messages API (`/v1/messages`) for clients like Claude Code.
 - **knowing what the model costs**: `stats` records per-day token usage (input / input cache / output / total) of `/v1/chat/completions` into one JSON file per day.
 - **seeing and poking what is going on**: `debug` provides a manual command endpoint and dumps inbound/outbound requests to disk.
@@ -40,6 +40,7 @@ cp config.yaml.example config.yaml
 | `probe` | probe config object, enabled with `enable: true`, see below |
 | `restart` | restart config object, enabled with `enable: true`, see below |
 | `watchdog` | watchdog config object, enabled with `enable: true`, see below |
+| `errguard` | backend error guard config object, enabled with `enable: true`, see below |
 | `request` | request policy config object, see below |
 | `stats` | stats policy config object, see below |
 | `debug` | debug config object, see below |
@@ -103,6 +104,34 @@ MTP draft-acceptance watchdog. The supervisor taps every `/v1/chat/completions` 
 | `watchdog.pause` | seconds the watchdog fully pauses (no `/slots` fetching at all) after a trigger or a `/slots` fetch failure, default `30` |
 | `watchdog.verbose` | whether to log the measured speed on normal windows (a request is active and the speed is normal), default `false` |
 | `watchdog.command` | shell command run after declaring unhealthy, e.g. restarting llama |
+
+### errguard
+
+Backend error guard. A backend fault does not always show up as a hang or an output loop (what `probe` / `restart` / `watchdog` catch): llama.cpp can also answer a request with an OpenAI-style error object, either as a stream event
+
+```
+data: {"error":{"type":"server_error","message":"..."}}
+```
+
+or as a plain non-stream JSON body
+
+```
+{"error":{"type":"server_error","message":"..."}}
+```
+
+The supervisor taps every proxied `/v1/chat/completions` response (streaming and non-streaming, whatever the HTTP status), extracts such an error object, and when its `message` matches any regular expression in `errguard.patterns` (Go regexp; an empty list matches nothing, so the guard never triggers) it runs `errguard.command` — so a fault that surfaces as an error payload is self-healed the same way. The response bytes still reach the client verbatim; the guard only observes them.
+
+- The match is on the error `message` (the `type` and `code` are logged but not matched). A pattern is compiled at startup; an invalid regexp fails startup rather than silently never matching.
+- `errguard.cooldown` is a suppression window after a trigger: while it is active a further matching error is logged but the command is not re-run, so a burst of matching errors (many concurrent requests hitting the same backend fault) runs the command once. A value `<= 0` disables it.
+- The guard reuses the completion tap, but on its own it does **not** turn on the `stream_options.include_usage` request injection (that stays tied to `stats` / `watchdog`), so enabling only `errguard` leaves the outbound stream unchanged.
+- The supervisor's own injected stream-interruption event (an abnormal stream end from a killed backend / reset connection, see the stream guard) carries the same error shape, but the guard **ignores it** (it is tagged with a distinct `code`): an abnormal stream end is not a backend error message, so reacting to it would let the guard re-trigger on the very restart it ran (a dead connection is the `watchdog` / `restart` concern).
+
+| Field | Description |
+|---|---|
+| `errguard.enable` | whether enabled, default `false` |
+| `errguard.patterns` | list of regular expressions (Go regexp) matched against the backend error message; an empty list matches nothing (the guard never triggers), default empty |
+| `errguard.command` | shell command run when an error message matches, e.g. restarting llama; empty logs the match only |
+| `errguard.cooldown` | seconds during which the command is not re-run after a trigger (a burst of matching errors triggers once), default `30` (a value `<= 0` disables) |
 
 ### request
 

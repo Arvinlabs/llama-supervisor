@@ -95,6 +95,45 @@ func (g *DebugGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// ErrGuardGroup backend error guard config; Enable true means enabled. The
+// supervisor taps every proxied /v1/chat/completions response (streaming and
+// non-streaming) and looks for an OpenAI-style error object in the backend
+// payload: a stream `data: {"error":{...}}` event or a non-stream JSON body
+// `{"error":{...}}`. When the error message matches any configured pattern the
+// command runs (e.g. a supervisorctl restart), so a backend fault that surfaces
+// as an error payload instead of a hang or an output loop is also self-healed
+type ErrGuardGroup struct {
+	Enable bool `yaml:"enable"` // whether enabled
+	// Patterns is the list of regular expressions (Go regexp) matched against the
+	// backend error message. An empty list matches nothing (the guard never triggers)
+	Patterns []string `yaml:"patterns"`
+	// Command shell command run when an error message matches
+	Command string `yaml:"command"`
+	// Cooldown seconds during which the command is not re-run after a trigger, so
+	// a burst of matching errors (many concurrent requests hitting the same backend
+	// fault) runs the command once. Default 30, a value <= 0 disables the cooldown
+	Cooldown int `yaml:"cooldown"`
+}
+
+func (g *ErrGuardGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
+// EffectiveCooldown returns the error guard's effective cooldown: the configured
+// seconds, the default 30s when unset (0), and 0 (disabled) when set negative
+func (g *ErrGuardGroup) EffectiveCooldown() time.Duration {
+	if g == nil {
+		return 0
+	}
+	switch {
+	case g.Cooldown < 0:
+		return 0 // explicitly disabled
+	case g.Cooldown > 0:
+		return time.Duration(g.Cooldown) * time.Second
+	}
+	return 30 * time.Second
+}
+
 // RequestGroup request policy config; Enable true means enabled, each sub-feature
 // is independently switchable within the group
 type RequestGroup struct {
@@ -154,6 +193,7 @@ type Config struct {
 	Anthropic      *AnthropicGroup `yaml:"anthropic"`
 	Stats          *StatsGroup     `yaml:"stats"`
 	Debug          *DebugGroup     `yaml:"debug"`
+	ErrGuard       *ErrGuardGroup  `yaml:"errguard"`
 }
 
 // RestartInterval returns the restart group's idle threshold (configured in seconds)

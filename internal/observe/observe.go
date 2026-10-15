@@ -22,6 +22,16 @@ type Observation struct {
 	DraftAccepted int // MTP/speculative draft tokens accepted (0 when not reported)
 }
 
+// ErrorInfo is one backend error event observed on a chat completion response: an
+// OpenAI-style top-level "error" object carried either by a stream data event
+// (`data: {"error":{...}}`) or by a non-stream JSON body (`{"error":{...}}`). The
+// proxy extracts it from the tapped response and hands it to the error guard.
+type ErrorInfo struct {
+	Type    string // error.type (e.g. "server_error")
+	Message string // error.message (matched against the configured patterns)
+	Code    string // error.code (optional)
+}
+
 // HasDraft reports whether the observation carries MTP/speculative draft data.
 func (o Observation) HasDraft() bool { return o.DraftN > 0 }
 

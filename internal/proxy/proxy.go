@@ -16,6 +16,7 @@ import (
 	"github.com/Arvinlabs/llama-supervisor/internal/anthropic"
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
 	"github.com/Arvinlabs/llama-supervisor/internal/debug"
+	"github.com/Arvinlabs/llama-supervisor/internal/errguard"
 	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 	"github.com/Arvinlabs/llama-supervisor/internal/probe"
 	"github.com/Arvinlabs/llama-supervisor/internal/request"
@@ -39,6 +40,7 @@ type Supervisor struct {
 	request   *request.Policy    // request policy (nil when no request sub-feature is enabled)
 	stats     *stats.Policy      // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
 	debug     *debug.Policy      // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
+	errguard  *errguard.Policy   // error guard policy (nil when disabled); runs the command when a tapped backend error message matches a pattern
 	anthropic *anthropic.Handler // Anthropic /v1/messages handler (nil when the anthropic protocol is disabled)
 }
 
@@ -81,6 +83,13 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	if cfg.Debug.Enabled() {
 		p.debug = debug.New(cfg.Debug)
 	}
+	if cfg.ErrGuard.Enabled() {
+		eg, err := errguard.New(cfg.ErrGuard, ctx)
+		if err != nil {
+			log.Fatalf("errguard: %v", err)
+		}
+		p.errguard = eg
+	}
 	// the Anthropic handler proxies /v1/messages to the supervisor itself: the
 	// loopback request runs the full OpenAI pipeline above (the client's API key
 	// is passed through, so the inner request policy is the single auth point)
@@ -108,12 +117,15 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		}
 		// completion tap: parse the completion's observation out of the response and fan it
 		// out to the consumers (outermost wrap, so an injected stream error event still
-		// flows through the scanner); active whenever at least one consumer is registered
-		if p.observe && res.Body != nil && res.Request.URL.Path == completionsPath {
+		// flows through the scanner); active whenever at least one consumer is registered,
+		// or the error guard needs the tap to look for backend error payloads (the guard
+		// alone does not turn on usage injection)
+		if (p.observe || p.errguard != nil) && res.Body != nil && res.Request.URL.Path == completionsPath {
 			stream := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
 			res.Body = &completionTap{
 				inner:  res.Body,
 				hub:    p.hub,
+				guard:  p.errguard,
 				stream: stream,
 				id:     p.hub.StreamStart(stream),
 			}
@@ -152,8 +164,8 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	}
 	// the completion tap is active whenever any consumer (stats or watchdog) subscribed
 	p.observe = p.hub.Len() > 0
-	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.anthropic == nil && p.stats == nil && p.debug == nil {
-		log.Print("[config] restart, probe, watchdog, request, anthropic, stats and debug all disabled, proxying only")
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.anthropic == nil && p.stats == nil && p.debug == nil && p.errguard == nil {
+		log.Print("[config] restart, probe, watchdog, request, anthropic, stats, debug and errguard all disabled, proxying only")
 	}
 	return p
 }

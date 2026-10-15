@@ -78,6 +78,28 @@ watchdog:
   # command to run after declaring unhealthy
   command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
 
+# ===== errguard config: enabled when enable is true =====
+# backend error guard: the supervisor taps every proxied /v1/chat/completions response
+# (streaming and non-streaming) and looks for an OpenAI-style error object in the backend
+# payload - a stream event `data: {"error":{"type":"server_error","message":"..."}}` or a
+# plain non-stream JSON body `{"error":{"type":"server_error","message":"..."}}`. When the
+# error message matches any pattern the command runs, so a backend fault that surfaces as an
+# error payload (instead of a hang or an output loop the probe/restart/watchdog catch) is
+# also self-healed
+errguard:
+  enable: false
+  # list of regular expressions (Go regexp) matched against the backend error message;
+  # an empty list matches nothing (the guard never triggers)
+  patterns:
+    - "out of memory"
+    - "server_error"
+  # command to run when an error message matches
+  command: "sudo /usr/bin/supervisorctl stop llama && sleep 3 && sudo /usr/bin/supervisorctl start llama"
+  # seconds during which the command is not re-run after a trigger, so a burst of matching
+  # errors (many concurrent requests hitting the same backend fault) runs the command once;
+  # default 30, a value <= 0 disables the cooldown
+  cooldown: 30
+
 # ===== stats config: enabled when enable is true =====
 # per-day token usage accounting for /v1/chat/completions: one JSON file per day (YYYY-MM-DD.json)
 # in savePath with the day's cumulative counters (requests/input/input_cache/output/total).

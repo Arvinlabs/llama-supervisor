@@ -127,6 +127,19 @@ func main() {
 	} else {
 		log.Print("[config] debug disabled")
 	}
+	if cfg.ErrGuard.Enabled() {
+		scope := "no pattern (never triggers)"
+		if n := len(cfg.ErrGuard.Patterns); n > 0 {
+			scope = fmt.Sprintf("%d pattern(s)", n)
+		}
+		log.Printf("[config] errguard enabled: match=%s cooldown=%s", scope, cfg.ErrGuard.EffectiveCooldown())
+		for _, p := range cfg.ErrGuard.Patterns {
+			log.Print("[config] errguard pattern: " + p)
+		}
+		log.Print("[config] errguard command: " + cfg.ErrGuard.Command)
+	} else {
+		log.Print("[config] errguard disabled")
+	}
 
 	// startup command
 	if cfg.StartupCommand != "" {
