@@ -194,6 +194,11 @@ type CloudGroup struct {
 	// OutputReserve the output tokens reserved for the decision when the client
 	// did not set max_tokens; the decision uses max(max_tokens, this). Default 1024
 	OutputReserve int `yaml:"outputReserve"`
+	// EstimateMargin the factor the prompt size estimate is multiplied by before
+	// the routing decision (the estimate is a lower bound: image parts and the
+	// chat template's rendering are only approximated, and some templates render
+	// the tools definitions repeatedly). Default 1.15 (a 15% allowance)
+	EstimateMargin float64 `yaml:"estimateMargin"`
 	// MaxConcurrency caps how many requests may be in flight to the cloud at
 	// once; further requests wait for a slot (or for their client to disconnect).
 	// 0 (default) means unlimited
@@ -218,6 +223,14 @@ func CloudOutputReserve(cfg Config) int {
 		return cfg.Cloud.OutputReserve
 	}
 	return 1024
+}
+
+// CloudEstimateMargin returns the cloud group's effective estimate margin (default 1.15)
+func CloudEstimateMargin(cfg Config) float64 {
+	if cfg.Cloud != nil && cfg.Cloud.EstimateMargin > 0 {
+		return cfg.Cloud.EstimateMargin
+	}
+	return 1.15
 }
 
 // StatsGroup stats policy config; Enable true (and SavePath non-empty) means enabled
@@ -301,6 +314,9 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if cfg.Cloud.OutputReserve < 0 {
 			return cfg, fmt.Errorf("cloud outputReserve %d: must not be negative", cfg.Cloud.OutputReserve)
+		}
+		if cfg.Cloud.EstimateMargin < 0 {
+			return cfg, fmt.Errorf("cloud estimateMargin %v: must not be negative", cfg.Cloud.EstimateMargin)
 		}
 		if cfg.Cloud.MaxConcurrency < 0 {
 			return cfg, fmt.Errorf("cloud maxConcurrency %d: must not be negative", cfg.Cloud.MaxConcurrency)

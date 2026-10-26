@@ -47,26 +47,38 @@ func New(backend, apiKey string) *Estimator {
 	return &Estimator{backend: backend, apiKey: apiKey, client: &http.Client{Timeout: tokenizeTimeout}}
 }
 
+// Result is the prompt size estimate of one request body with its breakdown,
+// so the caller can reconcile the estimate with the backend's real count
+type Result struct {
+	Tokens int // the estimated total prompt tokens (text + images + per-message overhead)
+	Text   int // the exact token count of the prompt text from the backend's tokenizer
+	Images int // the number of image parts (counted at a fixed allowance, not texted)
+	NMsg   int // the number of messages
+	Tools  int // the raw byte size of the tools definitions (0 when none)
+}
+
 // Estimate returns the prompt token size of one chat completion request body:
 // the exact text token count from the backend's tokenizer, plus the image parts
 // and the chat template's per-message overhead. It fails - never guesses - when
 // the backend cannot count the text. A body without any text yields the fixed
 // parts only (0 for a body without messages, which the caller treats as "cannot
 // judge, keep it local")
-func (e *Estimator) Estimate(ctx context.Context, body []byte) (int, error) {
-	text, images, nMsg := extractPrompt(body)
-	var tokens int
+func (e *Estimator) Estimate(ctx context.Context, body []byte) (Result, error) {
+	var res Result
+	text, images, nMsg, toolsBytes := extractPrompt(body)
+	res.Images, res.NMsg, res.Tools = images, nMsg, toolsBytes
 	if len(text) > 0 {
 		if len(text) > maxTokenizeBytes {
-			return 0, fmt.Errorf("prompt text too large for exact tokenization (%d bytes)", len(text))
+			return res, fmt.Errorf("prompt text too large for exact tokenization (%d bytes)", len(text))
 		}
 		n, err := e.tokenize(ctx, text)
 		if err != nil {
-			return 0, err
+			return res, err
 		}
-		tokens = n
+		res.Text = n
 	}
-	return tokens + defaultImageTokens*images + perMessageOverhead*nMsg, nil
+	res.Tokens = res.Text + defaultImageTokens*images + perMessageOverhead*nMsg
+	return res, nil
 }
 
 // tokenize asks the local llama.cpp backend's POST /tokenize for the exact
@@ -107,17 +119,18 @@ func (e *Estimator) tokenize(ctx context.Context, text string) (int, error) {
 }
 
 // extractPrompt pulls the prompt text (in request order), the number of image
-// parts and the message count out of a chat completion request body: the
-// top-level system field, each message's text content (string, or the text
-// parts of an array content), the tool call names and arguments, and the tools
-// definitions. Image parts are counted, not texted
-func extractPrompt(body []byte) (text string, images, nMsg int) {
+// parts, the message count and the raw tools size out of a chat completion
+// request body: the top-level system field, each message's text content
+// (string, or the text parts of an array content), the tool call names and
+// arguments, and the tools definitions. Image parts are counted, not texted
+func extractPrompt(body []byte) (text string, images, nMsg, toolsBytes int) {
 	var sb strings.Builder
 	if system := gjson.GetBytes(body, "system"); system.Type == gjson.String {
 		sb.WriteString(system.String())
 	}
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
 		sb.WriteString(tools.Raw)
+		toolsBytes = len(tools.Raw)
 	}
 	messages := gjson.GetBytes(body, "messages").Array()
 	nMsg = len(messages)
@@ -141,5 +154,5 @@ func extractPrompt(body []byte) (text string, images, nMsg int) {
 			sb.WriteString(f.Get("arguments").String())
 		}
 	}
-	return sb.String(), images, nMsg
+	return sb.String(), images, nMsg, toolsBytes
 }

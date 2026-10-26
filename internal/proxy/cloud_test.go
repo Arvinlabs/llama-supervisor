@@ -705,6 +705,56 @@ func TestCloudRoutesOnExactTokenize(t *testing.T) {
 	}
 }
 
+// the estimate margin scales the raw prompt estimate (not the output reserve)
+// before the decision: a 2400-token prompt plus the 1024 reserve is 3424, under
+// the limit (4096 * 0.9 = 3686), so without a margin it stays local; with a
+// 1.5 margin the estimate is 3600 and 3600 + 1024 = 4624 routes it to the cloud
+func TestCloudEstimateMarginRoutesOversizedRawEstimate(t *testing.T) {
+	var tokens int32 = 2400
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/props":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"n_ctx":4096}`))
+		case "/tokenize":
+			var sb strings.Builder
+			sb.WriteString(`{"tokens":[`)
+			for i := 0; i < int(atomic.LoadInt32(&tokens)); i++ {
+				if i > 0 {
+					sb.WriteString(",")
+				}
+				sb.WriteString("1")
+			}
+			sb.WriteString(`]}`)
+			_, _ = w.Write([]byte(sb.String()))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer localSrv.Close()
+	cloudRec := &completionRecorder{}
+	cloudSrv := httptest.NewServer(cloudRec.handler())
+	defer cloudSrv.Close()
+
+	sup := New(cloudTestConfig(localSrv.URL, cloudSrv.URL, func(g *config.CloudGroup) {
+		g.EstimateMargin = 1.5
+	}), context.Background())
+	srv := httptest.NewServer(sup)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+completionsPath, "application/json", bytes.NewReader(bigChatBody('m', 200)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := cloudRec.hit(completionsPath); got != 1 {
+		t.Fatalf("cloud hits = %d, want 1 (the margin must push the estimate over the limit)", got)
+	}
+}
+
 // the size comes from the local backend's tokenizer and nowhere else: when it
 // cannot count the prompt (here: no /tokenize endpoint at all), the request is
 // not judged and stays local instead of being estimated by a client-side guess

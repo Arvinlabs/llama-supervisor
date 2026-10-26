@@ -181,6 +181,11 @@ cloud:
   # output tokens reserved for the decision when the client did not set max_tokens;
   # the decision uses max(max_tokens, this). Default 1024
   outputReserve: 1024
+  # factor the prompt size estimate is multiplied by before the decision (the
+  # estimate is a lower bound: image parts and the chat template's rendering are
+  # only approximated, and some templates render the tools definitions
+  # repeatedly). Default 1.15 (a 15% allowance)
+  estimateMargin: 1.15
   # max in-flight cloud requests; further requests wait for a slot (or for their
   # client to disconnect). 0 (default) means unlimited
   maxConcurrency: 0

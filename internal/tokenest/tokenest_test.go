@@ -45,12 +45,15 @@ func TestExtractPrompt(t *testing.T) {
 			{"role":"user","content":"world"}
 		]
 	}`)
-	text, images, nMsg := extractPrompt(body)
+	text, images, nMsg, toolsBytes := extractPrompt(body)
 	if images != 1 {
 		t.Errorf("images = %d, want 1", images)
 	}
 	if nMsg != 3 {
 		t.Errorf("nMsg = %d, want 3", nMsg)
+	}
+	if toolsBytes == 0 {
+		t.Errorf("toolsBytes = 0, want the tools definitions' raw size")
 	}
 	for _, want := range []string{"sys", "hi", "ok", "f", `{"a":1}`, "world", `"description":"d"`} {
 		if !strings.Contains(text, want) {
@@ -67,8 +70,8 @@ func TestEstimateExactFromBackend(t *testing.T) {
 	e := New(srv.URL, "")
 	body := []byte(`{"messages":[{"role":"user","content":"hello world"}]}`)
 	// 5 exact tokens + 0 images + 1 message * 4 overhead
-	if got, err := e.Estimate(context.Background(), body); err != nil || got != 9 {
-		t.Fatalf("Estimate = %d, %v; want 9, nil", got, err)
+	if got, err := e.Estimate(context.Background(), body); err != nil || got.Tokens != 9 || got.Text != 5 || got.NMsg != 1 {
+		t.Fatalf("Estimate = %+v, %v; want Tokens 9, Text 5, NMsg 1, nil", got, err)
 	}
 }
 
@@ -140,17 +143,17 @@ func TestEstimateFixedParts(t *testing.T) {
 	e := New(srv.URL, "")
 	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"x"}}]}]}`)
 	// 1 exact token + 1 image * 256 + 1 message * 4 overhead
-	if got, err := e.Estimate(context.Background(), body); err != nil || got != 1+defaultImageTokens+perMessageOverhead {
-		t.Fatalf("Estimate = %d, %v; want %d, nil", got, err, 1+defaultImageTokens+perMessageOverhead)
+	if got, err := e.Estimate(context.Background(), body); err != nil || got.Tokens != 1+defaultImageTokens+perMessageOverhead || got.Images != 1 {
+		t.Fatalf("Estimate = %+v, %v; want Tokens %d, Images 1, nil", got, err, 1+defaultImageTokens+perMessageOverhead)
 	}
 
 	noText := New("", "") // unreachable: no text means no tokenize call
 	body = []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`)
-	if got, err := noText.Estimate(context.Background(), body); err != nil || got != defaultImageTokens+perMessageOverhead {
-		t.Fatalf("Estimate = %d, %v; want %d, nil", got, err, defaultImageTokens+perMessageOverhead)
+	if got, err := noText.Estimate(context.Background(), body); err != nil || got.Tokens != defaultImageTokens+perMessageOverhead {
+		t.Fatalf("Estimate = %+v, %v; want Tokens %d, nil", got, err, defaultImageTokens+perMessageOverhead)
 	}
 	// a body without messages cannot be judged by the caller (0)
-	if got, err := noText.Estimate(context.Background(), []byte(`{}`)); err != nil || got != 0 {
-		t.Fatalf("Estimate({}) = %d, %v; want 0, nil", got, err)
+	if got, err := noText.Estimate(context.Background(), []byte(`{}`)); err != nil || got.Tokens != 0 {
+		t.Fatalf("Estimate({}) = %+v, %v; want Tokens 0, nil", got, err)
 	}
 }

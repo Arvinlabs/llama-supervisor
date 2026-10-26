@@ -27,6 +27,7 @@ func TestLoadConfigValidatesCloudFields(t *testing.T) {
 		{"negative threshold", "backend: http://127.0.0.1:8080\ncloud:\n  threshold: -0.1\n"},
 		{"negative outputReserve", "backend: http://127.0.0.1:8080\ncloud:\n  outputReserve: -1\n"},
 		{"negative maxConcurrency", "backend: http://127.0.0.1:8080\ncloud:\n  maxConcurrency: -2\n"},
+		{"negative estimateMargin", "backend: http://127.0.0.1:8080\ncloud:\n  estimateMargin: -1.5\n"},
 		{"missing apiKey", "backend: http://127.0.0.1:8080\ncloud:\n  enable: true\n  baseUrl: https://api.deepseek.com\n"},
 		{"bad baseUrl", "backend: http://127.0.0.1:8080\ncloud:\n  enable: true\n  baseUrl: api.deepseek.com\n  apiKey: sk-x\n"},
 	}
@@ -50,6 +51,7 @@ cloud:
   localMaxTokens: 8192
   threshold: 0.9
   outputReserve: 1024
+  estimateMargin: 1.15
   maxConcurrency: 8
 `)
 	if err != nil {
@@ -60,6 +62,9 @@ cloud:
 	}
 	if got := cfg.Cloud.MaxConcurrency; got != 8 {
 		t.Fatalf("maxConcurrency = %d", got)
+	}
+	if got := CloudEstimateMargin(cfg); got != 1.15 {
+		t.Fatalf("estimateMargin = %v, want 1.15", got)
 	}
 }
 
@@ -79,5 +84,8 @@ cloud:
 	}
 	if got := CloudOutputReserve(cfg); got != 1024 {
 		t.Fatalf("outputReserve = %d, want 1024", got)
+	}
+	if got := CloudEstimateMargin(cfg); got != 1.15 {
+		t.Fatalf("estimateMargin = %v, want 1.15", got)
 	}
 }

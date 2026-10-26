@@ -65,22 +65,24 @@ func newCloudTransport() *http.Transport {
 // and routes to the cloud when the estimate plus the reserved output does not
 // fit in the local context window (localctx) times the threshold
 type cloudRouter struct {
-	cfg           config.CloudGroup
-	threshold     float64
-	outputReserve int
-	localCtx      *localctx.Provider
-	estimator     *tokenest.Estimator
-	sem           chan struct{} // cloud concurrency slots; nil means unlimited
-	warnThrottle  atomic.Int64  // seconds of the last "context window unknown" warning (rate limit)
+	cfg            config.CloudGroup
+	threshold      float64
+	outputReserve  int
+	estimateMargin float64
+	localCtx       *localctx.Provider
+	estimator      *tokenest.Estimator
+	sem            chan struct{} // cloud concurrency slots; nil means unlimited
+	warnThrottle   atomic.Int64  // seconds of the last "context window unknown" warning (rate limit)
 }
 
 func newCloudRouter(cfg config.Config, backend string) *cloudRouter {
 	cr := &cloudRouter{
-		cfg:           *cfg.Cloud,
-		threshold:     config.CloudThreshold(cfg),
-		outputReserve: config.CloudOutputReserve(cfg),
-		localCtx:      localctx.New(backend, cfg.ApiKey, cfg.Cloud.LocalMaxTokens),
-		estimator:     tokenest.New(backend, cfg.ApiKey),
+		cfg:            *cfg.Cloud,
+		threshold:      config.CloudThreshold(cfg),
+		outputReserve:  config.CloudOutputReserve(cfg),
+		estimateMargin: config.CloudEstimateMargin(cfg),
+		localCtx:       localctx.New(backend, cfg.ApiKey, cfg.Cloud.LocalMaxTokens),
+		estimator:      tokenest.New(backend, cfg.ApiKey),
 	}
 	if n := cfg.Cloud.MaxConcurrency; n > 0 {
 		cr.sem = make(chan struct{}, n)
@@ -137,7 +139,7 @@ func (cr *cloudRouter) Route(ctx context.Context, r *http.Request) bool {
 	defer restoreBody(r, body)
 	// the size comes from the local backend's tokenizer and nowhere else: when it
 	// cannot be obtained the request is not judged and stays local
-	n, estErr := cr.estimator.Estimate(ctx, body)
+	est, estErr := cr.estimator.Estimate(ctx, body)
 	if estErr != nil {
 		log.Printf("[cloud] prompt estimation failed (%v), keeping the request local: %s", estErr, r.URL.Path)
 		return false
@@ -157,9 +159,13 @@ func (cr *cloudRouter) Route(ctx context.Context, r *http.Request) bool {
 		}
 	}
 	limit := int(float64(nctx) * cr.threshold)
-	route := n+reserve > limit
-	log.Printf("[cloud] est=%d (reserve %d) limit=%d (n_ctx=%d) -> %s",
-		n+reserve, reserve, limit, nctx, targetName(route))
+	// the estimate is a lower bound (image parts and the chat template's rendering
+	// are only approximated): it is scaled by the margin before the decision, the
+	// exact output reserve is not
+	route := int(float64(est.Tokens)*cr.estimateMargin)+reserve > limit
+	log.Printf("[cloud] est=%d (raw %d, margin %g, images %d, msgs %d, tools %dB, reserve %d) limit=%d (n_ctx=%d) -> %s",
+		int(float64(est.Tokens)*cr.estimateMargin)+reserve, est.Tokens, cr.estimateMargin,
+		est.Images, est.NMsg, est.Tools, reserve, limit, nctx, targetName(route))
 	return route
 }
 
