@@ -50,10 +50,11 @@ func New(backend, apiKey string) *Estimator {
 // Result is the prompt size estimate of one request body with its breakdown,
 // so the caller can reconcile the estimate with the backend's real count
 type Result struct {
-	Tokens int // the estimated total prompt tokens (text + images + per-message overhead)
+	Tokens int // the estimated total prompt tokens (text + images + per-message/per-call overhead)
 	Text   int // the exact token count of the prompt text from the backend's tokenizer
 	Images int // the number of image parts (counted at a fixed allowance, not texted)
 	NMsg   int // the number of messages
+	Calls  int // the number of tool calls
 	Tools  int // the raw byte size of the tools definitions (0 when none)
 }
 
@@ -65,8 +66,8 @@ type Result struct {
 // judge, keep it local")
 func (e *Estimator) Estimate(ctx context.Context, body []byte) (Result, error) {
 	var res Result
-	text, images, nMsg, toolsBytes := extractPrompt(body)
-	res.Images, res.NMsg, res.Tools = images, nMsg, toolsBytes
+	text, images, nMsg, nCalls, toolsBytes := extractPrompt(body)
+	res.Images, res.NMsg, res.Calls, res.Tools = images, nMsg, nCalls, toolsBytes
 	if len(text) > 0 {
 		if len(text) > maxTokenizeBytes {
 			return res, fmt.Errorf("prompt text too large for exact tokenization (%d bytes)", len(text))
@@ -120,10 +121,12 @@ func (e *Estimator) tokenize(ctx context.Context, text string) (int, error) {
 
 // extractPrompt pulls the prompt text (in request order), the number of image
 // parts, the message count and the raw tools size out of a chat completion
-// request body: the top-level system field, each message's text content
-// (string, or the text parts of an array content), the tool call names and
-// arguments, and the tools definitions. Image parts are counted, not texted
-func extractPrompt(body []byte) (text string, images, nMsg, toolsBytes int) {
+// request body: the top-level system field, each message's reasoning_content
+// (thinking models send it back on every later turn) and text content
+// (string, or the text parts of an array content), each tool call as its raw
+// JSON (not split into name/arguments), and the tools definitions. Image
+// parts are counted, not texted
+func extractPrompt(body []byte) (text string, images, nMsg, nCalls, toolsBytes int) {
 	var sb strings.Builder
 	if system := gjson.GetBytes(body, "system"); system.Type == gjson.String {
 		sb.WriteString(system.String())
@@ -135,6 +138,9 @@ func extractPrompt(body []byte) (text string, images, nMsg, toolsBytes int) {
 	messages := gjson.GetBytes(body, "messages").Array()
 	nMsg = len(messages)
 	for _, m := range messages {
+		if rc := m.Get("reasoning_content"); rc.Type == gjson.String {
+			sb.WriteString(rc.String())
+		}
 		switch c := m.Get("content"); c.Type {
 		case gjson.String:
 			sb.WriteString(c.String())
@@ -149,10 +155,9 @@ func extractPrompt(body []byte) (text string, images, nMsg, toolsBytes int) {
 			}
 		}
 		for _, tc := range m.Get("tool_calls").Array() {
-			f := tc.Get("function")
-			sb.WriteString(f.Get("name").String())
-			sb.WriteString(f.Get("arguments").String())
+			sb.WriteString(tc.Raw)
+			nCalls++
 		}
 	}
-	return sb.String(), images, nMsg, toolsBytes
+	return sb.String(), images, nMsg, nCalls, toolsBytes
 }

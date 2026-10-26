@@ -183,7 +183,7 @@ Because the Anthropic handler (`/v1/messages`) runs through the same internal pi
 | `cloud.localMaxTokens` | local context window override in tokens, default `0` (auto-detect from the backend) |
 | `cloud.threshold` | routing threshold: the request goes to the cloud when its estimated token size exceeds `n_ctx * threshold`, default `0.9` |
 | `cloud.outputReserve` | output tokens reserved for the decision when the client did not set `max_tokens` (the decision uses `max(max_tokens, this)`), default `1024` |
-| `cloud.estimateMargin` | factor the prompt size estimate is multiplied by before the decision (the estimate is a lower bound: image parts and the chat template's rendering are only approximated, and some templates render the tools definitions repeatedly); default `1.15` |
+| `cloud.estimateMargin` | factor the prompt size estimate is multiplied by before the decision (the estimate is a lower bound: image parts and the chat template's rendering are only approximated, and some templates render the tools definitions repeatedly); default `1` |
 | `cloud.maxConcurrency` | max in-flight cloud requests, default `0` (unlimited); further requests wait for a slot or for their client to disconnect |
 
 ### anthropic

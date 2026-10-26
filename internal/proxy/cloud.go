@@ -163,9 +163,9 @@ func (cr *cloudRouter) Route(ctx context.Context, r *http.Request) bool {
 	// are only approximated): it is scaled by the margin before the decision, the
 	// exact output reserve is not
 	route := int(float64(est.Tokens)*cr.estimateMargin)+reserve > limit
-	log.Printf("[cloud] est=%d (raw %d, margin %g, images %d, msgs %d, tools %dB, reserve %d) limit=%d (n_ctx=%d) -> %s",
+	log.Printf("[cloud] est=%d (raw %d, margin %g, images %d, msgs %d, calls %d, tools %dB, reserve %d) limit=%d (n_ctx=%d) -> %s",
 		int(float64(est.Tokens)*cr.estimateMargin)+reserve, est.Tokens, cr.estimateMargin,
-		est.Images, est.NMsg, est.Tools, reserve, limit, nctx, targetName(route))
+		est.Images, est.NMsg, est.Calls, est.Tools, reserve, limit, nctx, targetName(route))
 	return route
 }
 

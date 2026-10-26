@@ -184,8 +184,8 @@ cloud:
   # factor the prompt size estimate is multiplied by before the decision (the
   # estimate is a lower bound: image parts and the chat template's rendering are
   # only approximated, and some templates render the tools definitions
-  # repeatedly). Default 1.15 (a 15% allowance)
-  estimateMargin: 1.15
+  # repeatedly). Default 1 (no allowance)
+  estimateMargin: 1
   # max in-flight cloud requests; further requests wait for a slot (or for their
   # client to disconnect). 0 (default) means unlimited
   maxConcurrency: 0

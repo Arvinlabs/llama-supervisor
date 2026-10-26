@@ -41,21 +41,28 @@ func TestExtractPrompt(t *testing.T) {
 		"tools":[{"type":"function","function":{"name":"f","description":"d"}}],
 		"messages":[
 			{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"x"}}]},
-			{"role":"assistant","content":"ok","tool_calls":[{"function":{"name":"f","arguments":"{\"a\":1}"}}]},
+			{"role":"assistant","reasoning_content":"let me think","content":"ok","tool_calls":[{"function":{"name":"f","arguments":"{\"a\":1}"}}]},
 			{"role":"user","content":"world"}
 		]
 	}`)
-	text, images, nMsg, toolsBytes := extractPrompt(body)
+	text, images, nMsg, nCalls, toolsBytes := extractPrompt(body)
 	if images != 1 {
 		t.Errorf("images = %d, want 1", images)
 	}
 	if nMsg != 3 {
 		t.Errorf("nMsg = %d, want 3", nMsg)
 	}
+	if nCalls != 1 {
+		t.Errorf("nCalls = %d, want 1", nCalls)
+	}
+	// the tool call goes in as its raw JSON, not split into name/arguments
+	if !strings.Contains(text, `{"function":{"name":"f","arguments":"{\"a\":1}"}}`) {
+		t.Errorf("extracted text %q missing the raw tool call JSON", text)
+	}
 	if toolsBytes == 0 {
 		t.Errorf("toolsBytes = 0, want the tools definitions' raw size")
 	}
-	for _, want := range []string{"sys", "hi", "ok", "f", `{"a":1}`, "world", `"description":"d"`} {
+	for _, want := range []string{"sys", "hi", "ok", "f", "world", `"description":"d"`, "let me think"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("extracted text %q missing %q", text, want)
 		}
@@ -156,4 +163,153 @@ func TestEstimateFixedParts(t *testing.T) {
 	if got, err := noText.Estimate(context.Background(), []byte(`{}`)); err != nil || got.Tokens != 0 {
 		t.Fatalf("Estimate({}) = %+v, %v; want Tokens 0, nil", got, err)
 	}
+}
+
+func TestRealRequestBody(t *testing.T) {
+	// the user's real request; the base64 payload is shortened - extractPrompt
+	// only counts image parts, it never reads the URL value, so parsing is
+	// byte-identical for the purposes of token counting
+	body := []byte(`{
+  "model": "qwen-local",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant.\nCurrent date: 2026-10-26\n"},
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "Hey! 👋 How's it going? What can I help you with today?",
+     "reasoning_content": "The user said \"hi\" - a simple greeting. I should respond warmly and casually.\n"},
+    {"role": "user", "content": [
+      {"type": "text", "text": "你好"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoshortened"}}
+    ]}
+  ],
+  "stream": true,
+  "tools": [
+    {"type": "function", "function": {"name": "calc",
+     "description": "Evaluate a math expression. Supports + - * / // % ( ), ^ or ** for power (e.g. 2^10, right-associative), sqrt(x) or √x for square root (e.g. √16, √(2+2)). Example: 2^10+√16",
+     "parameters": {"properties": {"expr": {"type": "string"}}, "required": ["expr"], "type": "object"}}}
+  ],
+  "stream_options": {"include_usage": true},
+  "reasoning_effort": "medium"
+}`)
+
+	text, images, nMsg, _, toolsBytes := extractPrompt(body)
+	t.Logf("images=%d nMsg=%d toolsBytes=%d", images, nMsg, toolsBytes)
+	t.Logf("extracted text (%d bytes):\n%s", len(text), text)
+
+	if images != 1 {
+		t.Errorf("images = %d, want 1", images)
+	}
+	if nMsg != 4 {
+		t.Errorf("nMsg = %d, want 4", nMsg)
+	}
+	if toolsBytes <= 0 {
+		t.Errorf("toolsBytes = %d, want > 0", toolsBytes)
+	}
+	// every piece of prompt text must be present exactly once
+	for _, want := range []string{
+		"You are a helpful assistant.",
+		"Current date: 2026-10-26",
+		"hi",
+		`The user said "hi" - a simple greeting. I should respond warmly and casually.`, // the sent-back reasoning
+		"How's it going?",
+		"你好",
+		"calc",
+		"Evaluate a math expression",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("extracted text missing %q", want)
+		}
+	}
+	// nothing that is not prompt text may leak in
+	for _, bad := range []string{
+		`"role"`,           // JSON structure
+		"qwen-local",       // model field
+		"stream_options",   // request parameters
+		"reasoning_effort", // request parameter
+		"include_usage",    // request parameter
+		"iVBORw0KGgo",      // image base64 (counted as a flat part, not texted)
+	} {
+		if strings.Contains(text, bad) {
+			t.Errorf("extracted text wrongly contains %q", bad)
+		}
+	}
+
+	// end-to-end estimate with a mock tokenizer
+	var sawText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		sawText = string(b)
+		_, _ = w.Write([]byte(`{"tokens":[1,2,3]}`))
+	}))
+	defer srv.Close()
+	e := New(srv.URL, "")
+	got, err := e.Estimate(context.Background(), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Result: %+v", got)
+	if got.Text != 3 {
+		t.Errorf("Text = %d, want the mock's 3", got.Text)
+	}
+	want := 3 + defaultImageTokens + perMessageOverhead*4
+	if got.Tokens != want {
+		t.Errorf("Tokens = %d, want %d", got.Tokens, want)
+	}
+	if !strings.Contains(sawText, "warmly") {
+		t.Errorf("/tokenize payload missing the sent-back reasoning text")
+	}
+	if strings.Contains(sawText, "iVBORw0KGgo") {
+		t.Errorf("/tokenize payload contains image base64")
+	}
+}
+
+func TestToolsDefinitionsAreTexted(t *testing.T) {
+	body := []byte(`{
+  "model": "qwen-local",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant.\nCurrent date: 2026-10-26\n"},
+    {"role": "user", "content": "hi"}
+  ],
+  "stream": true,
+  "tools": [
+    {"type": "function", "function": {"name": "calc",
+     "description": "Evaluate a math expression. Supports + - * / // % ( ), ^ or ** for power (e.g. 2^10, right-associative), sqrt(x) or \u221ax for square root (e.g. \u221a16, \u221a(2+2)). Example: 2^10+\u221a16",
+     "parameters": {"properties": {"expr": {"type": "string"}}, "required": ["expr"], "type": "object"}}}
+  ],
+  "stream_options": {"include_usage": true},
+  "reasoning_effort": "medium"
+}`)
+
+	text, _, nMsg, nCalls, toolsBytes := extractPrompt(body)
+	if nMsg != 2 || nCalls != 0 {
+		t.Fatalf("nMsg=%d nCalls=%d, want 2 0", nMsg, nCalls)
+	}
+	if toolsBytes != 381 {
+		t.Errorf("toolsBytes = %d, want 381 (the raw tools array)", toolsBytes)
+	}
+	for _, want := range []string{`{"type": "function"`, "calc", "Evaluate a math expression", `"expr"`, `"required"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("extracted text missing the tools content %q", want)
+		}
+	}
+
+	// end-to-end: the tools JSON must reach the /tokenize payload
+	var saw string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		saw = string(b)
+		_, _ = w.Write([]byte(`{"tokens":[1]}`))
+	}))
+	defer srv.Close()
+	got, err := New(srv.URL, "").Estimate(context.Background(), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(saw, "Evaluate a math expression") {
+		t.Errorf("/tokenize payload missing the tools definitions")
+	}
+	// 1 (text) + 0 images + 4 (nMsg 2) * 4 overhead
+	if got.Tokens != 1+perMessageOverhead*2 {
+		t.Errorf("Tokens = %d, want %d", got.Tokens, 1+perMessageOverhead*2)
+	}
+	t.Logf("Result: %+v", got)
 }

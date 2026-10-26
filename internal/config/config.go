@@ -197,7 +197,7 @@ type CloudGroup struct {
 	// EstimateMargin the factor the prompt size estimate is multiplied by before
 	// the routing decision (the estimate is a lower bound: image parts and the
 	// chat template's rendering are only approximated, and some templates render
-	// the tools definitions repeatedly). Default 1.15 (a 15% allowance)
+	// the tools definitions repeatedly). Default 1 (no allowance)
 	EstimateMargin float64 `yaml:"estimateMargin"`
 	// MaxConcurrency caps how many requests may be in flight to the cloud at
 	// once; further requests wait for a slot (or for their client to disconnect).
@@ -225,12 +225,12 @@ func CloudOutputReserve(cfg Config) int {
 	return 1024
 }
 
-// CloudEstimateMargin returns the cloud group's effective estimate margin (default 1.15)
+// CloudEstimateMargin returns the cloud group's effective estimate margin (default 1)
 func CloudEstimateMargin(cfg Config) float64 {
 	if cfg.Cloud != nil && cfg.Cloud.EstimateMargin > 0 {
 		return cfg.Cloud.EstimateMargin
 	}
-	return 1.15
+	return 1
 }
 
 // StatsGroup stats policy config; Enable true (and SavePath non-empty) means enabled

@@ -64,7 +64,7 @@ cloud:
 		t.Fatalf("maxConcurrency = %d", got)
 	}
 	if got := CloudEstimateMargin(cfg); got != 1.15 {
-		t.Fatalf("estimateMargin = %v, want 1.15", got)
+		t.Fatalf("estimateMargin = %v, want the configured 1.15", got)
 	}
 }
 
@@ -85,7 +85,7 @@ cloud:
 	if got := CloudOutputReserve(cfg); got != 1024 {
 		t.Fatalf("outputReserve = %d, want 1024", got)
 	}
-	if got := CloudEstimateMargin(cfg); got != 1.15 {
-		t.Fatalf("estimateMargin = %v, want 1.15", got)
+	if got := CloudEstimateMargin(cfg); got != 1 {
+		t.Fatalf("estimateMargin = %v, want 1 (default)", got)
 	}
 }
