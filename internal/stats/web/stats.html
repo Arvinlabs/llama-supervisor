@@ -434,7 +434,7 @@
                 '<div class="tt-row"><span class="tt-sw" style="background:var(--input)"></span><span class="tt-label">input (not cached)</span><span class="tt-val">' + fmtNum(Math.max(0, x.input - x.input_cache)) + '</span></div>' +
                 '<div class="tt-row"><span class="tt-sw" style="background:var(--output)"></span><span class="tt-label">output</span><span class="tt-val">' + fmtNum(x.output) + '</span></div>' +
                 (cloud.total > 0
-                    ? '<div class="tt-row"><span class="tt-sw" style="background:var(--cloud)"></span><span class="tt-label">of which cloud (' + cloud.requests + ' req)</span><span class="tt-val">' + fmtNum(cloud.total) + '</span></div>'
+                    ? '<div class="tt-row"><span class="tt-sw" style="background:var(--cloud)"></span><span class="tt-label">cloud (' + cloud.requests + ' req)</span><span class="tt-val">' + fmtNum(cloud.total) + '</span></div>'
                     : '');
             tip.style.display = "block";
             const wrap = tip.parentElement;
