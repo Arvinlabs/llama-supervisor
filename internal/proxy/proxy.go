@@ -31,8 +31,15 @@ type Supervisor struct {
 	backendURL  string
 	backendAddr string // backend host:port (validated at startup, must carry an explicit port)
 
+	cloudRoute *cloudRouter           // cloud fallback router (nil when the cloud is disabled)
+	cloudProxy *httputil.ReverseProxy // the second reverse proxy, to the cloud endpoint
+
 	hub     *observe.Hub // completion observation hub; stats and watchdog subscribe to it
-	observe bool         // whether the completion tap is active (at least one consumer is registered)
+	observe bool         // whether the local completion tap is active (at least one consumer is registered)
+	// observeCloud whether cloud completions must be observed too: only the
+	// consumers that opted in to cloud traffic (stats) need it, the watchdog
+	// never sees cloud completions (see observe.CloudConsumer)
+	observeCloud bool
 
 	restart   *restart.Policy    // restart policy (nil when restart is disabled)
 	probe     *probe.Policy      // probe policy (nil when probe is disabled)
@@ -78,6 +85,7 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 			if p.observe {
 				injectUsage(pr.Out)
 			}
+			negotiateCompression(pr.Out)
 		},
 	}
 	if cfg.Debug.Enabled() {
@@ -107,37 +115,7 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	// Go's HTTP/1.1 response body reads are not governed by the request ctx, otherwise the proxy
 	// would stay blocked on the backend stream read and the backend would keep generating
 	rp.ModifyResponse = func(res *http.Response) error {
-		cb := &ctxBody{ctx: res.Request.Context(), rc: res.Body, quit: make(chan struct{})}
-		// only SSE chat completion streams can receive the injected error event; any other
-		// response (non-stream JSON, /completion, /slots, ...) keeps the plain body
-		if res.Body != nil && shouldInjectStreamError(res) {
-			res.Body = &guardBody{inner: cb, ctx: res.Request.Context()}
-		} else {
-			res.Body = cb
-		}
-		// completion tap: parse the completion's observation out of the response and fan it
-		// out to the consumers (outermost wrap, so an injected stream error event still
-		// flows through the scanner); active whenever at least one consumer is registered,
-		// or the error guard needs the tap to look for backend error payloads (the guard
-		// alone does not turn on usage injection)
-		if (p.observe || p.errguard != nil) && res.Body != nil && res.Request.URL.Path == completionsPath {
-			stream := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
-			res.Body = &completionTap{
-				inner:  res.Body,
-				hub:    p.hub,
-				guard:  p.errguard,
-				stream: stream,
-				id:     p.hub.StreamStart(stream),
-			}
-		}
-		// backend response dump (no-op when debug.respSavePath is not set): the outermost
-		// wrap, so it sees exactly what the client receives (including an injected stream
-		// error event) and buffers it for the dump when the body is closed
-		if p.debug != nil {
-			p.debug.TapResponse(res)
-		}
-		cb.watch()
-		return nil
+		return p.wrapResponse(res, p.errguard, false)
 	}
 	p.proxy = rp
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -149,6 +127,49 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 			log.Printf("proxy %s %s: %v", r.Method, r.URL.Path, err)
 		}
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
+	}
+	// cloud fallback: a second reverse proxy to the cloud endpoint. It runs the same
+	// outbound pipeline as the local one (request policy, usage injection, response
+	// wraps) plus the cloud-specific rewrites (auth, model, sanitize), and its
+	// response tap carries a nil error guard: a cloud error payload must not trigger
+	// the local self-heal command. Usage is only injected when a consumer actually
+	// accounts cloud traffic (stats)
+	if cfg.Cloud.Enabled() {
+		cloud, cerr := url.Parse(strings.TrimRight(cfg.Cloud.BaseURL, "/"))
+		if cerr != nil {
+			log.Fatalf("cloud baseUrl %q: %v", cfg.Cloud.BaseURL, cerr)
+		}
+		p.cloudRoute = newCloudRouter(cfg, cfg.Backend)
+		crp := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(cloud)
+				if p.request != nil {
+					p.request.ModifyRequest(pr.Out)
+				}
+				if p.observeCloud {
+					injectUsage(pr.Out)
+				}
+				p.cloudRoute.rewriteModel(pr.Out)
+				sanitizeCloudBody(pr.Out)
+				p.cloudRoute.setAuth(pr.Out)
+				negotiateCompression(pr.Out)
+			},
+			FlushInterval: 0,
+		}
+		// connection-level timeouts (dial/TLS/response headers), so a black-holed
+		// cloud endpoint fails instead of hanging the request forever
+		var cloudRT http.RoundTripper = newCloudTransport()
+		if p.debug != nil && cfg.Debug.OutSavePath != "" {
+			cloudRT = &outboundTapTransport{inner: cloudRT, policy: p.debug}
+		}
+		crp.Transport = cloudRT
+		crp.ModifyResponse = func(res *http.Response) error {
+			return p.wrapResponse(res, nil, true)
+		}
+		crp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			p.cloudErrorHandler(w, r, err)
+		}
+		p.cloudProxy = crp
 	}
 
 	if cfg.Restart.Enabled() {
@@ -162,15 +183,20 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		p.hub.Register(p.watchdog)
 		p.hub.RegisterStream(p.watchdog) // the over-speed trigger judges in-flight completions by their kind and generated content
 	}
-	// the completion tap is active whenever any consumer (stats or watchdog) subscribed
+	// the local completion tap is active whenever any consumer (stats or watchdog)
+	// subscribed; cloud completions are only observed for the consumers that opted
+	// in to cloud traffic (stats), so the watchdog never touches cloud traffic
 	p.observe = p.hub.Len() > 0
-	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.anthropic == nil && p.stats == nil && p.debug == nil && p.errguard == nil {
-		log.Print("[config] restart, probe, watchdog, request, anthropic, stats, debug and errguard all disabled, proxying only")
+	p.observeCloud = p.hub.CloudLen() > 0
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.cloudRoute == nil && p.anthropic == nil && p.stats == nil && p.debug == nil && p.errguard == nil {
+		log.Print("[config] restart, probe, watchdog, request, cloud, anthropic, stats, debug and errguard all disabled, proxying only")
 	}
 	return p
 }
 
-// OnHTTPRequest refreshes the idle trackers of the enabled policies
+// OnHTTPRequest refreshes the idle trackers of the enabled policies: it is called
+// for the requests that actually use the local backend (see ServeHTTP), never for
+// a cloud-routed one
 func (p *Supervisor) OnHTTPRequest() {
 	if p.restart != nil {
 		p.restart.OnHTTPRequest()
@@ -287,25 +313,47 @@ func (b *ctxBody) watch() {
 	}()
 }
 
-// ServeHTTP handles an incoming request: if the probe idle timeout was crossed, probe first
-// (on unhealthy run the command and wait for the backend to be ready), then forward, and log the access
+// ServeHTTP handles an incoming request: route first (cloud fallback when the request
+// does not fit the local context, local otherwise), then - for a local request only -
+// refresh the idle trackers and run the probe when the idle timeout was crossed (on an
+// unhealthy verdict it runs the command and waits for the backend to be ready), forward,
+// and log the access
 func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	start := time.Now()
 	// inbound auth: the policy rejects missing/unknown keys (writing the 401 response
 	// itself) before the request is proxied
 	if p.request != nil && !p.request.Authorize(w, r) {
-		logAccess(http.StatusUnauthorized, r, start)
+		logAccess(http.StatusUnauthorized, "-", r, start)
 		return
 	}
 	if p.debug != nil {
 		p.debug.Tap(r) // no-op when debug.savePath is not set
 	}
 	rec := &statusRecorder{ResponseWriter: w}
-	// probe idle timeout: probe first; if the command actually ran (backend restarted), wait for the backend to be ready.
-	// restart timing needs no manual reset: this request's OnHTTPRequest already refreshed it
-	if p.probe != nil && p.probe.ConsumeIdle(ctx) {
-		p.waitBackendReady(ctx)
+	// cloud fallback: the router buffers the body (reinstalled either way) and reports
+	// whether the request does not fit the local context window
+	routeToCloud := false
+	if p.cloudRoute != nil {
+		routeToCloud = p.cloudRoute.Route(ctx, r)
+	}
+	// only a request that actually goes to the local model is backend activity: it
+	// refreshes the restart/probe idle timers, and if the probe idle timeout was crossed
+	// the backend is probed first (when the command actually ran, wait for the backend to
+	// be ready before forwarding). A cloud-routed request must do neither: it leaves the
+	// local model alone, so it can neither keep it from being restarted/unloaded as idle
+	// nor make the request wait for a local restart it does not depend on
+	if !routeToCloud {
+		p.OnHTTPRequest()
+		if p.probe != nil && p.probe.ConsumeIdle(ctx) {
+			p.waitBackendReady(ctx)
+			// the backend may have just been (re)started: the routing decision above was
+			// made against an unreachable or stale backend, so re-evaluate it before
+			// forwarding - an oversized prompt must not hit a fresh, empty context window
+			if p.cloudRoute != nil {
+				routeToCloud = p.cloudRoute.Route(ctx, r)
+			}
+		}
 	}
 	// On client disconnect: the request ctx is canceled -> ctxBody closes the backend connection ->
 	// the backend read is interrupted, and "client disconnected" is logged from ctxBody/ErrorHandler.
@@ -313,13 +361,26 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the ctx after the handler returns normally, which would be a false positive.
 	// watchdog probing is request-driven: a forwarded chat completion request starts the
 	// /slots sampling loop (first fetch a fixed 1s later, then per interval) and the last
-	// one in flight to end stops it; other paths never trigger sampling
-	if p.watchdog != nil && r.URL.Path == completionsPath {
+	// one in flight to end stops it; other paths never trigger sampling. A cloud-routed
+	// request never samples: /slots is a local-only endpoint
+	if p.watchdog != nil && r.URL.Path == completionsPath && !routeToCloud {
 		p.watchdog.OnRequestStart()
 		defer p.watchdog.OnRequestEnd()
 	}
-	p.proxy.ServeHTTP(rec, r)
-	logAccess(rec.status, r, start)
+	if routeToCloud {
+		// cloud.maxConcurrency: wait for a free slot (or the client to go away)
+		if !p.cloudRoute.acquire(ctx) {
+			log.Printf("[cloud] client gone while waiting for a cloud slot: %s %s", r.Method, r.URL.Path)
+			writeCloudError(rec, http.StatusBadGateway)
+			logAccess(rec.status, targetName(true), r, start)
+			return
+		}
+		defer p.cloudRoute.release()
+		p.cloudProxy.ServeHTTP(rec, r)
+	} else {
+		p.proxy.ServeHTTP(rec, r)
+	}
+	logAccess(rec.status, targetName(routeToCloud), r, start)
 }
 
 // StartBackground starts the background checkers:
@@ -353,6 +414,57 @@ func selfBaseURL(host string, port int) string {
 	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
+// wrapResponse wraps the backend response body with the shared response pipeline
+// (used by both the local and the cloud proxy): early abort on client disconnect
+// (ctxBody), the injected stream error event on abnormal ends (guardBody), the
+// completion observation tap (the error guard is passed per proxy: the cloud
+// responses use a nil guard, so a cloud error payload never triggers the local
+// self-heal command), and the response dump when debug is enabled.
+// cloud tells whether the response comes from the cloud backend: its observation
+// is tagged Cloud and only delivered to the consumers that opted in (stats), and
+// the local consumers (watchdog) never see it
+func (p *Supervisor) wrapResponse(res *http.Response, guard *errguard.Policy, cloud bool) error {
+	cb := &ctxBody{ctx: res.Request.Context(), rc: res.Body, quit: make(chan struct{})}
+	// only SSE chat completion streams can receive the injected error event; any other
+	// response (non-stream JSON, /completion, /slots, ...) keeps the plain body
+	if res.Body != nil && shouldInjectStreamError(res) {
+		res.Body = &guardBody{inner: cb, ctx: res.Request.Context()}
+	} else {
+		res.Body = cb
+	}
+	// completion tap: parse the completion's observation out of the response and fan it
+	// out to the consumers (outermost wrap, so an injected stream error event still
+	// flows through the scanner); active whenever at least one consumer is registered,
+	// or the error guard needs the tap to look for backend error payloads (the guard
+	// alone does not turn on usage injection). A cloud response is tapped only when a
+	// consumer accounts cloud traffic: without one, cloud traffic stays untouched
+	tapped := p.observe || guard != nil
+	if cloud {
+		tapped = p.observeCloud
+	}
+	if tapped && res.Body != nil && res.Request.URL.Path == completionsPath {
+		stream := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
+		res.Body = &completionTap{
+			inner:  res.Body,
+			hub:    p.hub,
+			guard:  guard,
+			stream: stream,
+			ctype:  res.Header.Get("Content-Type"),
+			cenc:   res.Header.Get("Content-Encoding"),
+			cloud:  cloud,
+			id:     p.hub.StreamStart(stream, cloud),
+		}
+	}
+	// backend response dump (no-op when debug.respSavePath is not set): the outermost
+	// wrap, so it sees exactly what the client receives (including an injected stream
+	// error event) and buffers it for the dump when the body is closed
+	if p.debug != nil {
+		p.debug.TapResponse(res)
+	}
+	cb.watch()
+	return nil
+}
+
 // shouldInjectStreamError reports whether the response is an SSE chat completion stream
 // that can receive the injected error event: the path must be the chat completion endpoint
 // and the response must actually be a stream (stream:false responses are plain JSON, as are
@@ -364,12 +476,13 @@ func shouldInjectStreamError(res *http.Response) bool {
 	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
 }
 
-// logAccess logs one access line: client, method, path, status code, elapsed time
-func logAccess(status int, r *http.Request, start time.Time) {
+// logAccess logs one access line: client, method, path, status code, elapsed time,
+// and the backend the request went to (local, cloud, or "-" when it never reached one)
+func logAccess(status int, target string, r *http.Request, start time.Time) {
 	if status == 0 {
 		status = http.StatusOK
 	}
-	log.Printf("[access] %s %s %s %d %s", r.RemoteAddr, r.Method, r.URL.RequestURI(), status, time.Since(start).Round(time.Microsecond))
+	log.Printf("[access] %s %s %s %d %s %s", r.RemoteAddr, r.Method, r.URL.RequestURI(), status, time.Since(start).Round(time.Microsecond), target)
 }
 
 // waitBackendReady polls the backend /health after a command ran, until the service is truly ready (2xx) before forwarding

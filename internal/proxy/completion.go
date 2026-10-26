@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,12 +14,24 @@ import (
 
 	"github.com/Arvinlabs/llama-supervisor/internal/errguard"
 	"github.com/Arvinlabs/llama-supervisor/internal/observe"
+	"github.com/Arvinlabs/llama-supervisor/internal/reqbody"
 )
 
 // completionsPath is the OpenAI-compatible chat completion endpoint: the only
 // proxied path the completion tap observes, and the only one eligible for the
 // injected SSE error event.
 const completionsPath = "/v1/chat/completions"
+
+// negotiateCompression drops the client's Accept-Encoding from the outbound
+// request, so Go's transport negotiates compression itself and transparently
+// decompresses the response body. The completion tap parses that body (stats'
+// usage counters, the watchdog's timings and generated content), which is
+// impossible on compressed bytes: a client that advertises gzip (curl and most
+// SDKs do) would otherwise make every observed completion invisible. The client
+// still receives a valid - just uncompressed - response
+func negotiateCompression(r *http.Request) {
+	r.Header.Del("Accept-Encoding")
+}
 
 // injectUsage force-injects stream_options.include_usage=true into streaming
 // POST chat completion JSON bodies so the backend always reports usage (and the
@@ -30,10 +44,9 @@ func injectUsage(r *http.Request) {
 	if mt := r.Header.Get("Content-Type"); !strings.HasPrefix(mt, "application/json") {
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	_ = r.Body.Close()
-	if err != nil {
-		return
+	body, ok := reqbody.Read(r)
+	if !ok {
+		return // the body was reinstalled untouched: never forward it empty
 	}
 	out := body
 	if len(bytes.TrimSpace(body)) > 0 && gjson.GetBytes(body, "stream").Bool() &&
@@ -56,7 +69,10 @@ type completionTap struct {
 	hub     *observe.Hub
 	guard   *errguard.Policy // error guard (nil when disabled): a backend error payload found in the response is reported to it
 	stream  bool
-	id      int    // the hub stream id of this in-flight completion (stream consumers, e.g. the watchdog over-speed judgment)
+	ctype   string // the response Content-Type (diagnostics: an unparsable body)
+	cenc    string // the response Content-Encoding (diagnostics: a body the tap cannot parse when compressed)
+	cloud   bool   // the completion was served by the cloud backend: its observation is flagged Cloud and it is not tracked by the stream consumers
+	id      int    // the hub stream id of this in-flight completion (stream consumers, e.g. the watchdog over-speed judgment); 0 for a cloud completion
 	partial []byte // stream: the unfinished trailing SSE line
 	buf     []byte // non-stream: accumulated body, parsed once at EOF
 	done    bool   // observation already published
@@ -72,15 +88,95 @@ func (b *completionTap) Read(p []byte) (int, error) {
 			b.buf = append(b.buf, p[:n]...)
 		}
 	}
-	if err == io.EOF && !b.stream && !b.eofDone {
+	if err != io.EOF {
+		return n, err
+	}
+	if b.stream {
+		b.flushTrailingLine()
+	} else if !b.eofDone {
 		b.eofDone = true
-		b.publish(parseObservation(b.buf))
-		if e, ok := parseError(b.buf); ok {
-			b.reportError(e)
-		}
+		b.publishFromBody()
 		b.buf = nil
 	}
 	return n, err
+}
+
+// publishFromBody parses a buffered non-stream body into an observation. The
+// plain JSON completion is the normal case; the body is also decoded when the
+// endpoint compressed it without being asked, and scanned for SSE data lines
+// when it is a stream the Content-Type did not announce (some relays and
+// gateways answer with an SSE body while announcing JSON) - the usage chunk is
+// the one thing stats must not miss
+func (b *completionTap) publishFromBody() {
+	body := b.buf
+	reportError := func() {
+		if e, ok := parseError(body); ok {
+			b.reportError(e)
+		}
+	}
+	if o := parseObservation(body); o != (observe.Observation{}) {
+		b.publish(o)
+		reportError()
+		return
+	}
+	if decoded, ok := decodeCompressed(body, b.cenc); ok {
+		if o := parseObservation(decoded); o != (observe.Observation{}) {
+			b.publish(o)
+			return
+		}
+		body = decoded
+	}
+	if o, ok := observationFromSSEBody(body); ok {
+		b.publish(o)
+		return
+	}
+	reportError()
+}
+
+// decodeCompressed inflates a gzip body: a server may compress a response even
+// when the request did not ask for it (the tap's diagnostics then show why the
+// raw bytes were unparsable)
+func decodeCompressed(body []byte, encoding string) ([]byte, bool) {
+	if !strings.EqualFold(strings.TrimSpace(encoding), "gzip") {
+		return nil, false
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(io.LimitReader(zr, 64<<20))
+	if err != nil || len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// observationFromSSEBody scans a whole body for SSE data lines and returns the
+// first line carrying an observation (the usage chunk of a stream whose
+// Content-Type did not announce it)
+func observationFromSSEBody(body []byte) (observe.Observation, bool) {
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		if o, ok := observationFromSSELine(line); ok {
+			return o, true
+		}
+	}
+	return observe.Observation{}, false
+}
+
+// flushTrailingLine parses the last SSE line of a stream that ended without a
+// trailing newline. Providers are not required to terminate the final event with
+// one, and the usage chunk (the one stats accounts) is often exactly that last
+// event: without this its tokens, and a cloud completion's cloud counters, would
+// be silently lost
+func (b *completionTap) flushTrailingLine() {
+	if len(bytes.TrimSpace(b.partial)) == 0 {
+		b.partial = nil
+		return
+	}
+	line := b.partial
+	b.partial = nil
+	b.handleLine(line)
 }
 
 // scan feeds an SSE chunk through the line scanner and publishes the
@@ -99,18 +195,25 @@ func (b *completionTap) scan(chunk []byte) {
 		}
 		line := b.partial[:i+1]
 		b.partial = b.partial[i+1:]
-		// a backend error event (data: {"error":{...}}): report it to the guard
-		if e, ok := errorFromSSELine(line); ok {
-			b.reportError(e)
-		}
-		// feed the generated content to the stream consumers (the watchdog over-speed judgment)
-		if s := contentFromSSELine(line); s != "" {
-			b.hub.StreamContent(b.id, s)
-		}
-		if !b.done {
-			if o, ok := observationFromSSELine(line); ok {
-				b.publish(o)
-			}
+		b.handleLine(line)
+	}
+}
+
+// handleLine processes one complete SSE line: a backend error event reaches the
+// guard, the generated content reaches the stream consumers, and the line that
+// carries the usage publishes the observation
+func (b *completionTap) handleLine(line []byte) {
+	// a backend error event (data: {"error":{...}}): report it to the guard
+	if e, ok := errorFromSSELine(line); ok {
+		b.reportError(e)
+	}
+	// feed the generated content to the stream consumers (the watchdog over-speed judgment)
+	if s := contentFromSSELine(line); s != "" {
+		b.hub.StreamContent(b.id, s)
+	}
+	if !b.done {
+		if o, ok := observationFromSSELine(line); ok {
+			b.publish(o)
 		}
 	}
 }
@@ -124,11 +227,14 @@ func (b *completionTap) reportError(e observe.ErrorInfo) {
 	}
 }
 
-// publish delivers the observation to the consumers when it carries data
+// publish delivers the observation to the consumers when it carries data; the
+// observation is tagged with its source, so the consumers that only judge the
+// local model never see a cloud completion
 func (b *completionTap) publish(o observe.Observation) {
 	if o == (observe.Observation{}) {
 		return
 	}
+	o.Cloud = b.cloud
 	b.hub.Notify(o)
 	b.done = true
 	// the stream buffer is only released once the scan is guaranteed to stop (no guard
@@ -142,6 +248,13 @@ func (b *completionTap) publish(o observe.Observation) {
 // body; the http client closes the backend TCP connection when the body is closed before
 // full read, so the backend stops processing early
 func (b *completionTap) Close() error {
+	// a cloud completion that ends with no usage anywhere is not accounted (an
+	// aborted client, or a provider that omits usage): say so once per request,
+	// otherwise the cloud counters would silently stay at 0 for it
+	if b.cloud && !b.done {
+		log.Printf("[cloud] completion not accounted: no usage in the response (Content-Type %q, Content-Encoding %q, stream=%t): the provider omitted it, the client aborted, or the body could not be parsed",
+			b.ctype, b.cenc, b.stream)
+	}
 	b.hub.StreamEnd(b.id)
 	return b.inner.Close()
 }
@@ -181,13 +294,19 @@ func observationFromSSELine(line []byte) (observe.Observation, bool) {
 // at the top level of the payload (present for both stream and non-stream).
 func parseObservation(data []byte) observe.Observation {
 	o := observe.Observation{
-		Prompt:        int(gjson.GetBytes(data, "usage.prompt_tokens").Int()),
-		Cached:        int(gjson.GetBytes(data, "usage.prompt_tokens_details.cached_tokens").Int()),
-		Completion:    int(gjson.GetBytes(data, "usage.completion_tokens").Int()),
-		Total:         int(gjson.GetBytes(data, "usage.total_tokens").Int()),
-		DraftN:        int(gjson.GetBytes(data, "timings.draft_n").Int()),
-		DraftAccepted: int(gjson.GetBytes(data, "timings.draft_n_accepted").Int()),
+		Prompt:     int(gjson.GetBytes(data, "usage.prompt_tokens").Int()),
+		Cached:     int(gjson.GetBytes(data, "usage.prompt_tokens_details.cached_tokens").Int()),
+		Completion: int(gjson.GetBytes(data, "usage.completion_tokens").Int()),
+		Total:      int(gjson.GetBytes(data, "usage.total_tokens").Int()),
 	}
+	if o.Cached == 0 {
+		// cloud endpoints report the prefix cache hits in their own field (DeepSeek:
+		// usage.prompt_cache_hit_tokens), so a cloud completion would otherwise always
+		// account 0 cached input tokens
+		o.Cached = int(gjson.GetBytes(data, "usage.prompt_cache_hit_tokens").Int())
+	}
+	o.DraftN = int(gjson.GetBytes(data, "timings.draft_n").Int())
+	o.DraftAccepted = int(gjson.GetBytes(data, "timings.draft_n_accepted").Int())
 	if o.Total == 0 {
 		o.Total = o.Prompt + o.Completion
 	}

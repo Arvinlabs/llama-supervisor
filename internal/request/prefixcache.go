@@ -3,16 +3,16 @@ package request
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"mime"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	"github.com/Arvinlabs/llama-supervisor/internal/reqbody"
 )
 
 // prefixCachePolicy is a request plugin that normalizes /v1/chat/completions
@@ -49,20 +49,17 @@ func (c *prefixCachePolicy) ModifyRequest(r *http.Request) {
 	if err != nil || mediaType != "application/json" {
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return
+	body, ok := reqbody.Read(r)
+	if !ok {
+		return // the body was reinstalled untouched: never forward it empty
 	}
-	r.Body.Close()
 	if len(bytes.TrimSpace(body)) == 0 {
 		return
 	}
 	out := normalizeChatCompletions(body)
 	// always (re)install the body: r.Body was drained and closed above, so even the
 	// unchanged case must be restored or the proxy would forward an empty body
-	r.Body = io.NopCloser(bytes.NewReader(out))
-	r.ContentLength = int64(len(out))
-	r.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	reqbody.Restore(r, out)
 }
 
 // normalizeChatCompletions canonicalizes the top-level "tools" array (sorted by

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -169,6 +170,56 @@ func (g *AnthropicGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// CloudGroup cloud fallback config; Enable true (and BaseURL and APIKey set)
+// means enabled. When the estimated size of a /v1/chat/completions request
+// exceeds the local model's context window, that request is routed to the
+// configured OpenAI-compatible cloud endpoint instead of the local backend
+type CloudGroup struct {
+	Enable bool `yaml:"enable"` // whether enabled
+	// BaseURL the cloud endpoint base URL, e.g. https://api.deepseek.com (no trailing slash)
+	BaseURL string `yaml:"baseUrl"`
+	// APIKey the cloud API key, sent to the cloud as Bearer <key>; client keys
+	// (virtual or real) never reach the cloud
+	APIKey string `yaml:"apiKey"`
+	// Model the model name rewritten into the request when it is routed to the
+	// cloud; empty passes the client's model name through unchanged
+	Model string `yaml:"model"`
+	// LocalMaxTokens the local context window in tokens; 0 (default) means
+	// auto-detect it from the backend (GET /props n_ctx, fallback: the n_ctx=
+	// suffix of the model ids from GET /v1/models)
+	LocalMaxTokens int `yaml:"localMaxTokens"`
+	// Threshold the request is routed to the cloud when its estimated token
+	// size exceeds n_ctx * threshold; default 0.9 (a 10% headroom)
+	Threshold float64 `yaml:"threshold"`
+	// OutputReserve the output tokens reserved for the decision when the client
+	// did not set max_tokens; the decision uses max(max_tokens, this). Default 1024
+	OutputReserve int `yaml:"outputReserve"`
+	// MaxConcurrency caps how many requests may be in flight to the cloud at
+	// once; further requests wait for a slot (or for their client to disconnect).
+	// 0 (default) means unlimited
+	MaxConcurrency int `yaml:"maxConcurrency"`
+}
+
+func (g *CloudGroup) Enabled() bool {
+	return g != nil && g.Enable && g.BaseURL != "" && g.APIKey != ""
+}
+
+// CloudThreshold returns the cloud group's effective threshold (default 0.9)
+func CloudThreshold(cfg Config) float64 {
+	if cfg.Cloud != nil && cfg.Cloud.Threshold > 0 && cfg.Cloud.Threshold <= 1 {
+		return cfg.Cloud.Threshold
+	}
+	return 0.9
+}
+
+// CloudOutputReserve returns the cloud group's effective output reserve in tokens (default 1024)
+func CloudOutputReserve(cfg Config) int {
+	if cfg.Cloud != nil && cfg.Cloud.OutputReserve > 0 {
+		return cfg.Cloud.OutputReserve
+	}
+	return 1024
+}
+
 // StatsGroup stats policy config; Enable true (and SavePath non-empty) means enabled
 type StatsGroup struct {
 	Enable     bool   `yaml:"enable"`     // whether enabled
@@ -190,6 +241,7 @@ type Config struct {
 	Probe          *ProbeGroup     `yaml:"probe"`
 	Watchdog       *WatchdogGroup  `yaml:"watchdog"`
 	Request        *RequestGroup   `yaml:"request"`
+	Cloud          *CloudGroup     `yaml:"cloud"`
 	Anthropic      *AnthropicGroup `yaml:"anthropic"`
 	Stats          *StatsGroup     `yaml:"stats"`
 	Debug          *DebugGroup     `yaml:"debug"`
@@ -231,6 +283,28 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Backend == "" {
 		return cfg, fmt.Errorf("config missing backend")
+	}
+	if cfg.Cloud != nil {
+		if cfg.Cloud.Enable {
+			if cfg.Cloud.BaseURL == "" || cfg.Cloud.APIKey == "" {
+				return cfg, fmt.Errorf("cloud enabled but baseUrl/apiKey missing")
+			}
+			u, err := url.Parse(cfg.Cloud.BaseURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return cfg, fmt.Errorf("cloud baseUrl %q is not a valid http(s) URL", cfg.Cloud.BaseURL)
+			}
+		}
+		// the numeric fields are validated even when the cloud is disabled: a
+		// typo would otherwise be silently replaced by the default value
+		if cfg.Cloud.Threshold < 0 || cfg.Cloud.Threshold > 1 {
+			return cfg, fmt.Errorf("cloud threshold %v: must be in (0,1]", cfg.Cloud.Threshold)
+		}
+		if cfg.Cloud.OutputReserve < 0 {
+			return cfg, fmt.Errorf("cloud outputReserve %d: must not be negative", cfg.Cloud.OutputReserve)
+		}
+		if cfg.Cloud.MaxConcurrency < 0 {
+			return cfg, fmt.Errorf("cloud maxConcurrency %d: must not be negative", cfg.Cloud.MaxConcurrency)
+		}
 	}
 	return cfg, nil
 }

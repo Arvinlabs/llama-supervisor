@@ -49,3 +49,75 @@ func TestHubRegisterNotify(t *testing.T) {
 	// no consumers: Notify is a safe no-op
 	(&Hub{}).Notify(Observation{})
 }
+
+// cloudRecorder opts in to cloud observations
+type cloudRecorder struct{ recorder }
+
+func (r *cloudRecorder) ConsumeCloud() bool { return true }
+
+// localOnlyRecorder refuses cloud observations explicitly (same as a consumer
+// that does not implement CloudConsumer at all)
+type localOnlyRecorder struct{ recorder }
+
+func (r *localOnlyRecorder) ConsumeCloud() bool { return false }
+
+// a cloud observation is only delivered to the consumers that opted in: the
+// watchdog (a plain Consumer) must never judge cloud traffic
+func TestHubCloudFiltering(t *testing.T) {
+	h := &Hub{}
+	local, cloud, refused := &recorder{}, &cloudRecorder{}, &localOnlyRecorder{}
+	h.Register(local)
+	h.Register(cloud)
+	h.Register(refused)
+	if h.Len() != 3 {
+		t.Fatalf("len = %d, want 3", h.Len())
+	}
+	if got := h.CloudLen(); got != 1 {
+		t.Fatalf("cloud consumers = %d, want 1 (only the opting-in one)", got)
+	}
+
+	h.Notify(Observation{Total: 5})              // local: everyone
+	h.Notify(Observation{Total: 9, Cloud: true}) // cloud: the opting-in consumer only
+	h.Notify(Observation{Total: 11})             // local again
+	if len(local.obs) != 2 || local.obs[0].Total != 5 || local.obs[1].Total != 11 {
+		t.Fatalf("local-only consumer got %+v, want the two local observations", local.obs)
+	}
+	if len(refused.obs) != 2 {
+		t.Fatalf("a consumer refusing cloud traffic got %+v, want the two local observations", refused.obs)
+	}
+	if len(cloud.obs) != 3 || !cloud.obs[1].Cloud || cloud.obs[1].Total != 9 {
+		t.Fatalf("opting-in consumer got %+v, want all three observations with source tags", cloud.obs)
+	}
+}
+
+// a cloud completion is never tracked by the stream consumers (id 0): its
+// content and end are ignored, so the watchdog cannot see in-flight cloud output
+func TestHubCloudStreamNotTracked(t *testing.T) {
+	h := &Hub{}
+	rec := &streamRecorder{}
+	h.RegisterStream(rec)
+	if id := h.StreamStart(true, true); id != 0 {
+		t.Fatalf("cloud stream id = %d, want 0 (untracked)", id)
+	}
+	h.StreamContent(0, "cloud text")
+	h.StreamEnd(0)
+	if rec.starts != 0 || rec.contents != 0 || rec.ends != 0 {
+		t.Fatalf("stream consumer saw a cloud completion: %+v", rec)
+	}
+	id := h.StreamStart(true, false)
+	if id == 0 {
+		t.Fatal("a local stream must be tracked")
+	}
+	h.StreamContent(id, "local text")
+	h.StreamEnd(id)
+	if rec.starts != 1 || rec.contents != 1 || rec.ends != 1 {
+		t.Fatalf("stream consumer missed the local completion: %+v", rec)
+	}
+}
+
+// streamRecorder counts the stream consumer calls
+type streamRecorder struct{ starts, contents, ends int }
+
+func (r *streamRecorder) OnStreamStart(_ int, _ bool)     { r.starts++ }
+func (r *streamRecorder) OnStreamContent(_ int, _ string) { r.contents++ }
+func (r *streamRecorder) OnStreamEnd(_ int)               { r.ends++ }

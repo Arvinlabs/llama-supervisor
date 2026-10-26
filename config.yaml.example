@@ -5,7 +5,7 @@ port: 8080
 # backend llama.cpp address
 backend: "http://127.0.0.1:8081"
 
-# global backend API key (sent as Bearer <key> on probe and /slots sampling requests, not used by normal proxying), default empty (not sent)
+# global backend API key (sent as Bearer <key> on probe, /slots sampling, cloud context-window detection and the /tokenize prompt counting the cloud routing depends on; not used by normal proxying), default empty (not sent). Required on key-protected backends, otherwise the cloud routing cannot see the context window or count a prompt and everything stays local
 apiKey: ""
 
 # startup command
@@ -108,6 +108,8 @@ errguard:
 stats:
   enable: false
   # directory the daily stats JSON files are saved to; empty disables the policy
+  # each day file holds the day's counters plus a "cloud" object with the subset of
+  # them that was routed to the cloud backend, so the local/cloud split is visible
   savePath: ""
   # how many days of stats files are kept, older ones are deleted; default 7
   retainDays: 7
@@ -153,6 +155,35 @@ request:
   # name, sort all JSON object keys recursively) so semantically identical requests share one
   # canonical byte form and the backend prefix cache hits
   prefixCache: true
+
+# ===== cloud fallback config: enabled when enable is true =====
+# when the estimated size of a /v1/chat/completions request exceeds the local model's
+# context window (n_ctx), that request is routed to the configured OpenAI-compatible
+# cloud endpoint instead of the local backend; smaller requests and everything else
+# (non-chat paths, undecidable requests) always stay local
+cloud:
+  enable: false
+  # cloud endpoint base URL, e.g. https://api.deepseek.com (no trailing slash)
+  baseUrl: "https://api.deepseek.com"
+  # cloud API key, sent to the cloud as Bearer <key>; client keys (virtual or real)
+  # never reach the cloud
+  apiKey: "sk-..."
+  # model name rewritten into the request when it is routed to the cloud; empty
+  # passes the client's model name through unchanged
+  model: "deepseek-chat"
+  # local context window in tokens; 0 (default) means auto-detect from the backend
+  # (GET /props n_ctx, fallback: the n_ctx= suffix of the model ids from GET /v1/models),
+  # re-checked every 5 minutes so a backend restart with new parameters is picked up
+  localMaxTokens: 0
+  # the request is routed to the cloud when its estimated token size exceeds
+  # n_ctx * threshold; default 0.9 (a 10% headroom)
+  threshold: 0.9
+  # output tokens reserved for the decision when the client did not set max_tokens;
+  # the decision uses max(max_tokens, this). Default 1024
+  outputReserve: 1024
+  # max in-flight cloud requests; further requests wait for a slot (or for their
+  # client to disconnect). 0 (default) means unlimited
+  maxConcurrency: 0
 
 # ===== anthropic protocol support config: enabled when enable is true =====
 # when enabled the supervisor accepts the Anthropic Messages API at POST /v1/messages:

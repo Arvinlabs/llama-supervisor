@@ -103,6 +103,18 @@ func main() {
 	} else {
 		log.Print("[config] anthropic disabled")
 	}
+	if cfg.Cloud.Enabled() {
+		conc := "unlimited"
+		if cfg.Cloud.MaxConcurrency > 0 {
+			conc = strconv.Itoa(cfg.Cloud.MaxConcurrency)
+		}
+		log.Printf("[config] cloud enabled: baseUrl=%s model=%q key=%s threshold=%.2f outputReserve=%d localMaxTokens=%d maxConcurrency=%s",
+			cfg.Cloud.BaseURL, cfg.Cloud.Model, config.SecretMask(cfg.Cloud.APIKey),
+			config.CloudThreshold(cfg), config.CloudOutputReserve(cfg),
+			cfg.Cloud.LocalMaxTokens, conc)
+	} else {
+		log.Print("[config] cloud disabled")
+	}
 	if cfg.Stats.Enabled() {
 		log.Printf("[config] stats enabled: savePath=%s retainDays=%d page=/stats", cfg.Stats.SavePath, config.StatsRetainDays(cfg))
 	} else {
@@ -163,7 +175,8 @@ func main() {
 			if sup.HandleDebug(w, r) || sup.HandleStats(w, r) || sup.HandleAnthropic(w, r) {
 				return
 			}
-			sup.OnHTTPRequest()
+			// the idle trackers are refreshed inside ServeHTTP, for the requests that are
+			// actually served by the local backend (a cloud-routed request is not)
 			sup.ServeHTTP(w, r)
 		}),
 	}

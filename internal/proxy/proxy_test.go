@@ -766,11 +766,15 @@ func TestHubStreamConsumers(t *testing.T) {
 	rec := &streamRec{log: &got}
 	hub.RegisterStream(rec)
 
-	id := hub.StreamStart(true)
+	id := hub.StreamStart(true, false)
 	hub.StreamContent(id, "aa")
 	hub.StreamContent(id, "bb")
 	hub.StreamContent(id, "") // no-op
 	hub.StreamEnd(id)
+	// a cloud completion is never tracked: no stream consumer sees it
+	cid := hub.StreamStart(true, true)
+	hub.StreamContent(cid, "cloud")
+	hub.StreamEnd(cid)
 	want := []string{"start", "content", "content", "end"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v", got)

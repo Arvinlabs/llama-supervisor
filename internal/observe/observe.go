@@ -20,6 +20,11 @@ type Observation struct {
 	Total         int // prompt + completion
 	DraftN        int // MTP/speculative draft tokens attempted (0 when not reported)
 	DraftAccepted int // MTP/speculative draft tokens accepted (0 when not reported)
+	// Cloud reports that the completion was served by the cloud fallback backend
+	// instead of the local one. Stats accounts it in the day's cloud counters; a
+	// consumer that only judges the local model (the watchdog) never receives a
+	// cloud observation at all, unless it opts in via CloudConsumer
+	Cloud bool
 }
 
 // ErrorInfo is one backend error event observed on a chat completion response: an
@@ -51,6 +56,22 @@ type Consumer interface {
 	OnCompletion(o Observation)
 }
 
+// CloudConsumer opts a consumer in to the observations of cloud-routed
+// completions. A consumer that does not implement it, or whose ConsumeCloud
+// returns false, only ever sees local completions: the hub never delivers a
+// cloud observation to it. The watchdog judges the local model (draft
+// acceptance, degenerate output), so it deliberately stays out of cloud traffic;
+// stats implements it to account the cloud usage separately.
+type CloudConsumer interface {
+	ConsumeCloud() bool
+}
+
+// consumesCloud reports whether c opted in to cloud observations
+func consumesCloud(c Consumer) bool {
+	cc, ok := c.(CloudConsumer)
+	return ok && cc.ConsumeCloud()
+}
+
 // StreamConsumer observes the lifecycle and generated content of in-flight
 // /v1/chat/completions responses (streaming and non-streaming). Implementations
 // must be safe for concurrent use: completions overlap, and content is
@@ -69,10 +90,11 @@ type StreamConsumer interface {
 // Hub fans an Observation out to every registered consumer. It is safe for
 // concurrent use.
 type Hub struct {
-	mu           sync.RWMutex
-	consumers    []Consumer
-	streams      []StreamConsumer
-	nextStreamID int
+	mu             sync.RWMutex
+	consumers      []Consumer
+	streams        []StreamConsumer
+	cloudConsumers int
+	nextStreamID   int
 }
 
 // Register adds a consumer; a nil consumer is ignored.
@@ -82,6 +104,9 @@ func (h *Hub) Register(c Consumer) {
 	}
 	h.mu.Lock()
 	h.consumers = append(h.consumers, c)
+	if consumesCloud(c) {
+		h.cloudConsumers++
+	}
 	h.mu.Unlock()
 }
 
@@ -93,13 +118,27 @@ func (h *Hub) Len() int {
 	return n
 }
 
+// CloudLen returns the number of registered consumers that opted in to cloud
+// observations (see CloudConsumer); 0 means no consumer needs cloud traffic
+// observed, so the proxy can leave cloud responses completely untouched.
+func (h *Hub) CloudLen() int {
+	h.mu.RLock()
+	n := h.cloudConsumers
+	h.mu.RUnlock()
+	return n
+}
+
 // Notify delivers the observation to all registered consumers, in registration
-// order. With no consumers it is a no-op.
+// order. A cloud observation is only delivered to the consumers that opted in to
+// cloud traffic (CloudConsumer). With no matching consumers it is a no-op.
 func (h *Hub) Notify(o Observation) {
 	h.mu.RLock()
 	consumers := h.consumers
 	h.mu.RUnlock()
 	for _, c := range consumers {
+		if o.Cloud && !consumesCloud(c) {
+			continue
+		}
 		c.OnCompletion(o)
 	}
 }
@@ -115,11 +154,17 @@ func (h *Hub) RegisterStream(c StreamConsumer) {
 }
 
 // StreamStart registers one in-flight chat completion response and returns its id;
-// every stream consumer is notified (stream says whether the response is a stream)
-func (h *Hub) StreamStart(stream bool) int {
+// every stream consumer is notified (stream says whether the response is a stream).
+// A cloud completion is never tracked (id 0, no consumer notified): stream
+// consumers judge the local model's generation, so cloud traffic stays invisible
+// to them, and its StreamContent/StreamEnd calls are no-ops.
+func (h *Hub) StreamStart(stream, cloud bool) int {
+	if cloud {
+		return 0
+	}
 	h.mu.Lock()
-	id := h.nextStreamID
 	h.nextStreamID++
+	id := h.nextStreamID
 	consumers := h.streams
 	h.mu.Unlock()
 	for _, c := range consumers {
@@ -129,9 +174,9 @@ func (h *Hub) StreamStart(stream bool) int {
 }
 
 // StreamContent delivers one piece of generated content of one stream to every
-// stream consumer; an empty piece is a no-op
+// stream consumer; an empty piece and an untracked (cloud, id 0) stream are no-ops
 func (h *Hub) StreamContent(id int, content string) {
-	if content == "" {
+	if id == 0 || content == "" {
 		return
 	}
 	h.mu.RLock()
@@ -142,8 +187,12 @@ func (h *Hub) StreamContent(id int, content string) {
 	}
 }
 
-// StreamEnd unregisters one in-flight chat completion response from every stream consumer
+// StreamEnd unregisters one in-flight chat completion response from every stream
+// consumer; an untracked (cloud, id 0) stream is a no-op
 func (h *Hub) StreamEnd(id int) {
+	if id == 0 {
+		return
+	}
 	h.mu.RLock()
 	consumers := h.streams
 	h.mu.RUnlock()

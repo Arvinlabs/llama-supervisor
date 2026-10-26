@@ -3,9 +3,14 @@
 Go reverse proxy that sits in front of a local llama.cpp server (`host:port` → `backend`) and turns it into an always-on, self-healing OpenAI-compatible service. A local model is one big process: it can hang, degenerate into a repeating output loop, or need a restart after being idle. The supervisor watches for that and takes care of it, while also acting as a small gateway layer for whoever calls the model. Use it for:
 
 - **keeping the backend alive**: `probe` re-checks the backend after an idle window (and waits for it to be healthy before the next request goes through), `restart` brings it back after prolonged idleness, `watchdog` catches an output loop (speed far above normal — judged against the live generated content of streaming responses before acting — or the live content alone falling into a long repeated run) or a degenerate MTP draft acceptance rate, and `errguard` catches a backend fault that surfaces as an OpenAI-style error payload (a stream `data: {"error":{...}}` event or a non-stream `{"error":{...}}` body) whose message matches a configured pattern — each runs a configured command (e.g. a `supervisorctl` restart) when its condition is met.
-- **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens), and `anthropic` exposes the same backend through the Anthropic Messages API (`/v1/messages`) for clients like Claude Code.
+- **serving the model behind a clean API**: `request.virtualKeys` gives you OpenAI-style API key authentication (the real backend key never reaches clients), `request.prefixCache` normalizes chat completion requests so the backend prompt cache hits more often (faster, cheaper first tokens), and `anthropic` exposes the same backend through the Anthropic Messages API (`/v1/messages`) for clients like Claude Code. `cloud` routes any chat completion that does not fit the local model's context window to a configured OpenAI-compatible cloud endpoint (e.g. DeepSeek), so oversized requests never truncate locally.
 - **knowing what the model costs**: `stats` records per-day token usage (input / input cache / output / total) of `/v1/chat/completions` into one JSON file per day.
 - **seeing and poking what is going on**: `debug` provides a manual command endpoint and dumps inbound/outbound requests to disk.
+
+Two implementation notes that hold for every backend:
+
+- the client's `Accept-Encoding` header is **not forwarded** to either backend. Go's transport then negotiates the encoding itself and transparently decompresses the response, so the completion tap (stats' usage counters, the watchdog's `timings` and generated content) always sees plain JSON/SSE: a compressed body is unparsable, which would silently drop the counters for clients that advertise gzip (curl and most SDKs do). The client receives a valid, uncompressed response.
+- the response body is passed through byte-identical and unbuffered; a `Content-Encoding` the tap cannot decode is reported (`completion not accounted: ...`) instead of being accounted with invented numbers.
 
 ## Build & Run
 
@@ -35,13 +40,14 @@ cp config.yaml.example config.yaml
 |---|---|
 | `host` / `port` | listen address |
 | `backend` | backend address, e.g. `http://127.0.0.1:8081` |
-| `apiKey` | global backend API key, sent as `Bearer <key>` on probe and `/slots` sampling requests; when `request.virtualKeys` is enabled it also re-signs accepted proxied requests, default empty |
+| `apiKey` | global backend API key, sent as `Bearer <key>` on probe, `/slots` sampling, cloud context-window detection and `/tokenize` estimation requests; when `request.virtualKeys` is enabled it also re-signs accepted proxied requests, default empty. On a key-protected backend the `cloud` sub-features (n_ctx detection, exact token counting) need it |
 | `startupCommand` | shell command run synchronously at startup |
 | `probe` | probe config object, enabled with `enable: true`, see below |
 | `restart` | restart config object, enabled with `enable: true`, see below |
 | `watchdog` | watchdog config object, enabled with `enable: true`, see below |
 | `errguard` | backend error guard config object, enabled with `enable: true`, see below |
 | `request` | request policy config object, see below |
+| `cloud` | cloud fallback config object, enabled with `enable: true`, see below |
 | `stats` | stats policy config object, see below |
 | `debug` | debug config object, see below |
 
@@ -51,7 +57,7 @@ Idle health probe. Timing starts at service startup and every request extends th
 
 - during streaming, `reasoning_content` and `content` are checked independently; if the tail character of either repeats `probe.repeatLimit` times (only characters listed in `probe.repeatChars` count, any character when it is empty), the probe is aborted early and the backend is declared unhealthy (a probe failure is also unhealthy).
 - if the content is normal and reaches `probe.successLimit` cumulative characters, the backend is declared healthy early, without waiting for generation to finish.
-- unhealthy: run `probe.command`, then poll the backend `/health` every 0.5s until it returns 2xx before forwarding. Healthy: proxy directly.
+- unhealthy: run `probe.command`, then poll the backend `/health` every 0.5s until it returns 2xx before forwarding. Healthy: proxy directly. Probing happens on the first **local** request after the idle window (a cloud-routed request does not probe and does not wait for the backend).
 
 | Field | Description |
 |---|---|
@@ -69,6 +75,8 @@ Idle health probe. Timing starts at service startup and every request extends th
 ### restart
 
 Idle restart. An independent background check (once per second): timing starts after the first request, every request extends the idle window, and once idle for `restart.interval` seconds the command runs directly, without waiting for a request. After a trigger timing pauses (no requests means no timing), a new request resumes it, and it can repeat periodically.
+
+Only a request that is actually **served by the local backend** counts as activity: a cloud-routed request (see the `cloud` section) leaves the local model alone, so it neither extends the idle window nor triggers/starts timing. With cloud-only traffic the local component therefore stays "idle" as far as the restart (and probe) policies are concerned.
 
 | Field | Description |
 |---|---|
@@ -88,7 +96,9 @@ When the over-speed streak is reached, the in-flight completions the supervisor 
 Independent content-loop trigger. A streaming completion whose generated tail keeps the same rune `watchdog.hardRepeat` times in a row (only runes listed in `watchdog.repeatChars` count) triggers directly, **without any over-speed** — a model can also degenerate into a loop that decodes at a normal speed that never crosses `watchdog.maxRate`, which the speed check alone would never catch. The trigger fires once per run (at the crossing), and not while the watchdog is in its pause window.
 - an over-speed with no in-flight completion visible to the tap (e.g. the request did not go through this proxy) triggers directly.
 
-MTP draft-acceptance watchdog. The supervisor taps every `/v1/chat/completions` response (streaming and non-streaming) and reads the backend's `timings`, which report `draft_n` (speculative/MTP draft tokens attempted) and `draft_n_accepted` (draft tokens accepted); the acceptance ratio is `draft_n_accepted / draft_n`. When `watchdog.minDraftRate` is set (> 0) and the ratio stays below it for `watchdog.draftTimes` consecutive completions (completions without draft data are ignored, so a backend without speculative decoding never trips this), the backend is declared unhealthy and `watchdog.command` runs, and the watchdog fully pauses for `watchdog.pause` seconds. This check shares its pause window with the speed check, and enabling it is what turns the completion tap (and the `stream_options.include_usage` request injection that makes the `timings` present on streams) active. `watchdog.minDraftRate: 0` (the default) turns it off.
+The watchdog only judges the **local** model: cloud-routed completions (see the `cloud` section) are completely invisible to it — they never start the `/slots` sampling, never enter the in-flight judgement, and never reach the draft-acceptance check.
+
+MTP draft-acceptance watchdog. The supervisor taps every local `/v1/chat/completions` response (streaming and non-streaming) and reads the backend's `timings`, which report `draft_n` (speculative/MTP draft tokens attempted) and `draft_n_accepted` (draft tokens accepted); the acceptance ratio is `draft_n_accepted / draft_n`. When `watchdog.minDraftRate` is set (> 0) and the ratio stays below it for `watchdog.draftTimes` consecutive completions (completions without draft data are ignored, so a backend without speculative decoding never trips this), the backend is declared unhealthy and `watchdog.command` runs, and the watchdog fully pauses for `watchdog.pause` seconds. This check shares its pause window with the speed check, and enabling it is what turns the completion tap (and the `stream_options.include_usage` request injection that makes the `timings` present on streams) active. `watchdog.minDraftRate: 0` (the default) turns it off.
 
 | Field | Description |
 |---|---|
@@ -146,6 +156,35 @@ Request policy with two independent sub-features (each only takes effect when `r
 | `request.virtualKeys` | virtual API key list, default empty (sub-feature off). When non-empty, proxied requests must carry one of the keys; missing or unknown keys are rejected with an OpenAI-format 401 error. Accepted requests are re-signed with the global `apiKey`, which never sees the virtual keys |
 | `request.prefixCache` | prefix cache, default `false`. When enabled, `/v1/chat/completions` request bodies are normalized before proxying: only the top-level `tools` list is touched — sorted by tool name (`function.name` / `custom.name` per the OpenAI spec, canonical-byte tiebreak), and every element is re-encoded in canonical form (object keys sorted at all levels, numbers in shortest form `1.0` -> `1`, no HTML escaping), so semantically identical tools lists in any key order / number literal / whitespace yield one canonical array; every byte outside the tools array is passed through exactly as the client sent it. A tools array with invalid UTF-8 is passed through unchanged |
 
+### cloud
+
+Cloud fallback: when enabled, each `/v1/chat/completions` request is size-estimated and, when it does not fit the local model's context window, routed to a configured OpenAI-compatible cloud endpoint (e.g. `https://api.deepseek.com`) instead of the local backend. Everything else — smaller requests, every non-chat path (`/completion`, `/embeddings`, `/slots`, `/health`, ...), and requests that cannot be judged (undecodable body, unknown context window) — stays local. The client sees no protocol difference: plain JSON and SSE streams are passed through unchanged from either backend.
+
+How it works:
+
+- The **local context window** (n_ctx) is auto-detected from the backend: `GET /props` (`n_ctx` field), falling back to parsing the `n_ctx=<n>` suffix of the model ids from `GET /v1/models`. The value is cached for 5 minutes (the supervisor itself restarts the backend, so the window may change with its startup parameters); a failing probe keeps serving the stale value, and a never-successful detection disables the routing (requests stay local). `cloud.localMaxTokens` overrides detection entirely.
+- The **request size** is the local backend's own count: the chat completion body's text (message texts including multimodal text parts, tool calls and tools definitions) is sent to the backend's `POST /tokenize`, whose token list is the estimate, plus image parts (a fixed token allowance each), plus a small per-message budget for chat template markers, plus a reserved output of `max(max_tokens, cloud.outputReserve)`. There is **no client-side fallback**: when the backend cannot count the text (no `/tokenize`, a failing or timed-out call, more than 8 MiB of text) the estimation fails, the error is logged and the request stays local.
+- A body larger than **32 MiB** is never judged (it already far exceeds any local context): it stays local and is forwarded **byte-identical** — the router buffers only a prefix and replays it followed by the rest of the client's body.
+- The request goes to the **cloud** when `estimate > n_ctx * cloud.threshold` (default 0.9). The cloud request runs the same outbound pipeline as the local one (request policy, usage injection, response observation) plus: the `Authorization` header is replaced with `cloud.apiKey` (client keys never leave), `cloud.model` rewrites the model name, and llama.cpp-specific sampling fields (`mirostat*`, `top_k`, `repeat_penalty`, `cache_prompt`, ...) are stripped. Standard OpenAI fields (`logit_bias`, `seed`, ...) are kept.
+- A **transport-level cloud failure** (connect/timeout/reset before any response) replies a 502 with an OpenAI-format error object (`{"error":{"message":"cloud unavailable","code":"cloud_unavailable"}}`), so OpenAI SDK clients parse it. A failed cloud request is **never retried** (neither on the cloud nor on the local backend, which would truncate the oversized prompt anyway): every response the cloud actually sent — status included — is passed through to the client unchanged. The cloud transport carries connection-level timeouts (dial 10s, TLS 10s, response headers 2min) so a black-holed endpoint fails instead of hanging the request, and `cloud.maxConcurrency` optionally caps the in-flight cloud requests. The access log tags every request with the backend it went to (`local` / `cloud`).
+- A cloud request is **not local backend activity**: the restart / probe idle timers are only refreshed (and the probe only runs) for requests that are served by the local backend (see the `restart` / `probe` sections). It still needs the backend's `/props` + `/tokenize` to make the routing decision, so while the backend is down every request stays local until it is reachable again.
+- The **watchdog never sees cloud traffic**: cloud completions are not observed by it (no draft-acceptance judgment, no in-flight over-speed/degenerate-output tracking, no `/slots` sampling — that endpoint is local anyway). Only `stats` opts in to cloud completions, accounting them in separate cloud counters. The local `errguard` is likewise never triggered by a cloud error payload.
+
+On a key-protected backend the global `apiKey` must be set: the supervisor's own `/props` / `/v1/models` / `/tokenize` calls carry it (client keys are not used for them). Without it the context-window detection falls back to `localMaxTokens` and `/tokenize` is rejected (401), so no request is ever judged and everything stays local.
+
+Because the Anthropic handler (`/v1/messages`) runs through the same internal pipeline, it inherits the cloud routing automatically.
+
+| Field | Description |
+|---|---|
+| `cloud.enable` | whether the cloud fallback is enabled, default `false`; also requires non-empty `baseUrl` and `apiKey` |
+| `cloud.baseUrl` | cloud endpoint base URL, e.g. `https://api.deepseek.com` (no trailing slash) |
+| `cloud.apiKey` | cloud API key, sent to the cloud as `Bearer <key>`; client keys (virtual or real) never reach the cloud |
+| `cloud.model` | model name rewritten into the request when it is routed to the cloud, default empty (the client's model name passes through) |
+| `cloud.localMaxTokens` | local context window override in tokens, default `0` (auto-detect from the backend) |
+| `cloud.threshold` | routing threshold: the request goes to the cloud when its estimated token size exceeds `n_ctx * threshold`, default `0.9` |
+| `cloud.outputReserve` | output tokens reserved for the decision when the client did not set `max_tokens` (the decision uses `max(max_tokens, this)`), default `1024` |
+| `cloud.maxConcurrency` | max in-flight cloud requests, default `0` (unlimited); further requests wait for a slot or for their client to disconnect |
+
 ### anthropic
 
 Anthropic Messages API support: when enabled, the supervisor accepts `POST /v1/messages` on top of the OpenAI pipeline. The request is translated to the OpenAI chat completion protocol at the outer edge (via the [relaykit](https://github.com/QuantumNous/new-api/tree/main/relaykit) conversion library) and proxied to the supervisor **itself**, so the loopback request runs the full, unmodified OpenAI pipeline — auth, request policy, usage injection, stats observation, watchdog, debug dumps. The OpenAI response (plain JSON or SSE) is translated back to the Anthropic protocol before it reaches the client: non-streaming responses become a single `message` object, streams become the `message_start` / `content_block_*` / `message_delta` / `message_stop` SSE event sequence.
@@ -163,22 +202,29 @@ Notes:
 
 ### stats
 
-Per-day token usage accounting, only for `/v1/chat/completions` (all other endpoints are ignored). One JSON file per day (`YYYY-MM-DD.json`) is saved to `stats.savePath`, holding the day's cumulative counters:
+Per-day token usage accounting, only for `/v1/chat/completions` (all other endpoints are ignored). One JSON file per day (`YYYY-MM-DD.json`) is saved to `stats.savePath`, holding the day's cumulative counters and the subset of them that was routed to the cloud (`cloud`, see the `cloud` section):
 
 ```json
 {
   "date": "2026-05-03",
-  "requests": 2,
-  "input": 37,
-  "input_cache": 23,
-  "output": 245,
-  "total": 282
+  "requests": 3,
+  "input": 137,
+  "input_cache": 63,
+  "output": 295,
+  "total": 432,
+  "cloud": {
+    "requests": 1,
+    "input": 100,
+    "input_cache": 40,
+    "output": 50,
+    "total": 150
+  }
 }
 ```
 
-The usage comes from the backend response: non-stream responses always carry it; for streams the supervisor force-injects `stream_options.include_usage` into the outbound request (a standard, client-visible extra usage chunk at the end of the stream), so the final usage chunk is always present. The response bytes pass through to the client unmodified and unbuffered. If a stream ends abnormally before the usage chunk, that request is simply not counted. Day files older than `stats.retainDays` days are deleted at startup and at most once a day (by the first recorded request after a date change).
+The usage comes from the backend response: non-stream responses always carry it; for streams the supervisor force-injects `stream_options.include_usage` into the outbound request (a standard, client-visible extra usage chunk at the end of the stream), so the final usage chunk is always present (cloud requests included, and only when stats is enabled — the watchdog alone does not observe cloud traffic). The tap parses the last SSE event even when the provider ends the stream without a trailing newline (or without `[DONE]`), so a usage chunk sent as the final, unterminated event is still counted; a body announced as JSON but carrying SSE data lines is scanned for the usage chunk too. A completion whose response carries no usage at all is logged as `not accounted` (with the response's `Content-Type` / `Content-Encoding` / stream flag) instead of being dropped silently. The prefix cache hits are read from `usage.prompt_tokens_details.cached_tokens` or, failing that, from the cloud-style `usage.prompt_cache_hit_tokens` (DeepSeek). The response bytes pass through to the client unmodified and unbuffered. If a stream ends abnormally before the usage chunk, that request is simply not counted. Day files older than `stats.retainDays` days are deleted at startup and at most once a day (by the first recorded request after a date change).
 
-The supervisor also serves an embedded web page at `/stats` (its JSON data at `/stats/data`): a per-day vertical stacked bar chart (one bar per day, height = total, split into input cache / input / output) above a per-day table with tokens in `k` units (e.g. `1.32k`) and the cache hit rate (`input_cache` / `input`, 2 decimal places), plus an all-days total row. The endpoints are served by the supervisor itself and never proxied.
+The supervisor also serves an embedded web page at `/stats` (its JSON data at `/stats/data`): a per-day vertical stacked bar chart (one bar per day, height = total, split into input cache / input / output) above a per-day table with tokens in `k` units (e.g. `1.32k`), the cloud requests / cloud tokens of the day, and the cache hit rate (`input_cache` / `input`, 2 decimal places), plus an all-days total row. The chart tooltips and the today card also show the cloud share of each bucket. The endpoints are served by the supervisor itself and never proxied.
 
 | Field | Description |
 |---|---|

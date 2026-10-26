@@ -97,9 +97,13 @@ func TestRecordTracksHour(t *testing.T) {
 		sum.Output += v.Output
 		sum.Total += v.Total
 	}
-	wantSum := hourStats{Requests: d.Requests, Input: d.Input, InputCache: d.InputCache, Output: d.Output, Total: d.Total}
-	if sum != wantSum {
-		t.Fatalf("hour buckets %v do not sum to day totals %+v", sum, d)
+	wantSum := counters{Requests: d.Requests, Input: d.Input, InputCache: d.InputCache, Output: d.Output, Total: d.Total}
+	if sum.counters != wantSum {
+		t.Fatalf("hour buckets %+v do not sum to day totals %+v", sum, d)
+	}
+	// no cloud traffic in this test: the cloud buckets stay zero
+	if d.Cloud != (counters{}) || sum.Cloud != (counters{}) {
+		t.Fatalf("cloud counters must stay zero: day %+v, hours %+v", d.Cloud, sum.Cloud)
 	}
 }
 
@@ -242,7 +246,7 @@ func TestDaysNewestFirst(t *testing.T) {
 	p := newTestPolicy(t, 30)
 	for _, off := range []int{-3, -1, 0} {
 		date := time.Now().AddDate(0, 0, off).Format(dateLayout)
-		d := dayStats{Date: date, Requests: 1, Input: 100, InputCache: 40, Output: 200, Total: 300}
+		d := dayStats{Date: date, counters: counters{Requests: 1, Input: 100, InputCache: 40, Output: 200, Total: 300}}
 		data, _ := json.Marshal(&d)
 		if err := os.WriteFile(filepath.Join(p.savePath, date+".json"), data, 0o644); err != nil {
 			t.Fatal(err)
@@ -261,6 +265,54 @@ func TestDaysNewestFirst(t *testing.T) {
 	for i := 1; i < len(days); i++ {
 		if days[i-1].Date <= days[i].Date {
 			t.Fatalf("days not sorted newest first: %v", days)
+		}
+	}
+}
+
+// a cloud-routed completion is accounted into the day totals and additionally
+// into the day's (and hour's) cloud counters
+func TestOnCompletionRecordsCloudSeparately(t *testing.T) {
+	p := newTestPolicy(t, 30)
+	p.OnCompletion(observe.Observation{Prompt: 10, Cached: 4, Completion: 20, Total: 30})
+	p.OnCompletion(observe.Observation{Prompt: 100, Cached: 60, Completion: 200, Total: 300, Cloud: true})
+	d := readDay(t, todayFile(t, p))
+	if d.Requests != 2 || d.Input != 110 || d.InputCache != 64 || d.Output != 220 || d.Total != 330 {
+		t.Fatalf("day totals must include the cloud completion: %+v", d)
+	}
+	want := counters{Requests: 1, Input: 100, InputCache: 60, Output: 200, Total: 300}
+	if d.Cloud != want {
+		t.Fatalf("cloud counters = %+v, want %+v", d.Cloud, want)
+	}
+	h := d.Hours[time.Now().Hour()]
+	if h.Cloud != want {
+		t.Fatalf("hour cloud counters = %+v, want %+v", h.Cloud, want)
+	}
+}
+
+// the day file carries a cloud counters object (zeros when nothing was routed
+// to the cloud), so a reader always finds the field
+func TestDayFileCarriesCloudCounters(t *testing.T) {
+	p := newTestPolicy(t, 30)
+	p.record(observe.Observation{Prompt: 5, Completion: 5, Total: 10})
+	data, err := os.ReadFile(todayFile(t, p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Cloud map[string]int `json:"cloud"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Cloud == nil {
+		t.Fatalf("cloud counters missing: %s", data)
+	}
+	for _, f := range []string{"requests", "input", "input_cache", "output", "total"} {
+		if _, ok := m.Cloud[f]; !ok {
+			t.Fatalf("cloud field %q missing: %s", f, data)
+		}
+		if m.Cloud[f] != 0 {
+			t.Fatalf("cloud field %q = %d, want 0: %s", f, m.Cloud[f], data)
 		}
 	}
 }
