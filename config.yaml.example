@@ -156,7 +156,7 @@ request:
   # canonical byte form and the backend prefix cache hits
   prefixCache: true
 
-# ===== cloud fallback config: enabled when enable is true =====
+# ===== cloud routing config: enabled when enable is true =====
 # when the estimated size of a /v1/chat/completions request exceeds the local model's
 # context window (n_ctx), that request is routed to the configured OpenAI-compatible
 # cloud endpoint instead of the local backend; smaller requests and everything else
@@ -172,7 +172,7 @@ cloud:
   # passes the client's model name through unchanged
   model: "deepseek-chat"
   # local context window in tokens; 0 (default) means auto-detect from the backend
-  # (GET /props n_ctx, fallback: the n_ctx= suffix of the model ids from GET /v1/models),
+  # (GET /props n_ctx, otherwise: the n_ctx= suffix of the model ids from GET /v1/models),
   # re-checked every 5 minutes so a backend restart with new parameters is picked up
   localMaxTokens: 0
   # the request is routed to the cloud when its estimated token size exceeds
@@ -189,6 +189,18 @@ cloud:
   # max in-flight cloud requests; further requests wait for a slot (or for their
   # client to disconnect). 0 (default) means unlimited
   maxConcurrency: 0
+  # source of the prompt token count: "tiktoken" (default) counts the text
+  # locally with the OpenAI-compatible BPE encoding of tiktokenModel, without
+  # any backend round-trip (the decision works while the backend is down; the
+  # count is approximate - the local model uses its own tokenizer - which the
+  # estimateMargin should cover); "backend" counts it with the local backend's
+  # own tokenizer (POST /tokenize: exact, matching what the local model would
+  # actually encode)
+  tokenizer: "tiktoken"
+  # model name whose tiktoken encoding is used when tokenizer is "tiktoken";
+  # names tiktoken knows (e.g. "gpt-4o") select their encoding, an empty (default)
+  # or unknown name uses the cl100k_base encoding
+  tiktokenModel: ""
 
 # ===== anthropic protocol support config: enabled when enable is true =====
 # when enabled the supervisor accepts the Anthropic Messages API at POST /v1/messages:

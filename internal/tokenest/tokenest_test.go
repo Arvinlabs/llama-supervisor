@@ -98,7 +98,7 @@ func TestEstimateSendsTheBackendKey(t *testing.T) {
 	}
 }
 
-// no heuristic fallback: without a working tokenizer the estimate is an error
+// no heuristic guess: without a working tokenizer the estimate is an error
 func TestEstimateFailsWithoutBackend(t *testing.T) {
 	e := New("", "")
 	body := []byte(`{"messages":[{"role":"user","content":"hello world"}]}`)
@@ -162,6 +162,36 @@ func TestEstimateFixedParts(t *testing.T) {
 	// a body without messages cannot be judged by the caller (0)
 	if got, err := noText.Estimate(context.Background(), []byte(`{}`)); err != nil || got.Tokens != 0 {
 		t.Fatalf("Estimate({}) = %+v, %v; want Tokens 0, nil", got, err)
+	}
+}
+
+// the tiktoken counter counts the text locally with the OpenAI family's BPE
+// encoding (cl100k_base): no backend round-trip, so the estimate works even
+// though the estimator is pointed at nothing, and the fixed parts still apply
+func TestEstimateTiktokenNeedsNoBackend(t *testing.T) {
+	e := NewTiktoken("")
+	body := []byte(`{"messages":[{"role":"user","content":"hello world"}]}`)
+	// cl100k_base encodes "hello world" as two tokens
+	if got, err := e.Estimate(context.Background(), body); err != nil || got.Tokens != 2+perMessageOverhead || got.Text != 2 || got.NMsg != 1 {
+		t.Fatalf("Estimate = %+v, %v; want Tokens %d, Text 2, NMsg 1, nil", got, err, 2+perMessageOverhead)
+	}
+}
+
+// an empty model name, a name tiktoken does not know, and a known name whose
+// encoding is cl100k_base must all yield the same count
+func TestEstimateTiktokenModelFallsBackToCl100k(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"hello world 你好"}]}`)
+	var want int
+	for i, model := range []string{"", "gpt-4", "no/such-model"} {
+		got, err := NewTiktoken(model).Estimate(context.Background(), body)
+		if err != nil || got.Text == 0 {
+			t.Fatalf("%d: Estimate(%q) = %+v, %v; want a non-zero count", i, model, got, err)
+		}
+		if i == 0 {
+			want = got.Text
+		} else if got.Text != want {
+			t.Fatalf("%d: Estimate(%q) Text = %d, want %d (cl100k_base)", i, model, got.Text, want)
+		}
 	}
 }
 

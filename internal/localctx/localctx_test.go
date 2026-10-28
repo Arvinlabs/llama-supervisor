@@ -23,7 +23,7 @@ func TestProviderFromProps(t *testing.T) {
 	}
 }
 
-func TestProviderFromModelsFallback(t *testing.T) {
+func TestProviderFromModelsSecondSource(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/props":

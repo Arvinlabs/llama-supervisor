@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -170,7 +171,7 @@ func (g *AnthropicGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
-// CloudGroup cloud fallback config; Enable true (and BaseURL and APIKey set)
+// CloudGroup cloud routing config; Enable true (and BaseURL and APIKey set)
 // means enabled. When the estimated size of a /v1/chat/completions request
 // exceeds the local model's context window, that request is routed to the
 // configured OpenAI-compatible cloud endpoint instead of the local backend
@@ -185,7 +186,7 @@ type CloudGroup struct {
 	// cloud; empty passes the client's model name through unchanged
 	Model string `yaml:"model"`
 	// LocalMaxTokens the local context window in tokens; 0 (default) means
-	// auto-detect it from the backend (GET /props n_ctx, fallback: the n_ctx=
+	// auto-detect it from the backend (GET /props n_ctx, otherwise: the n_ctx=
 	// suffix of the model ids from GET /v1/models)
 	LocalMaxTokens int `yaml:"localMaxTokens"`
 	// Threshold the request is routed to the cloud when its estimated token
@@ -203,6 +204,18 @@ type CloudGroup struct {
 	// once; further requests wait for a slot (or for their client to disconnect).
 	// 0 (default) means unlimited
 	MaxConcurrency int `yaml:"maxConcurrency"`
+	// Tokenizer the source of the prompt token count: "tiktoken" (default)
+	// counts the text locally with the OpenAI-compatible BPE encoding of
+	// TiktokenModel, without any backend round-trip (the decision works while
+	// the backend is down; the count is approximate - the local model uses
+	// its own tokenizer - which EstimateMargin should cover); "backend"
+	// counts it with the local backend's own tokenizer (POST /tokenize,
+	// exact: what the local model would actually encode)
+	Tokenizer string `yaml:"tokenizer"`
+	// TiktokenModel the model name whose tiktoken encoding is used when
+	// Tokenizer is "tiktoken"; any name tiktoken knows (e.g. "gpt-4o") selects
+	// its encoding, an empty or unknown name uses cl100k_base
+	TiktokenModel string `yaml:"tiktokenModel"`
 }
 
 func (g *CloudGroup) Enabled() bool {
@@ -320,6 +333,11 @@ func LoadConfig(path string) (Config, error) {
 		}
 		if cfg.Cloud.MaxConcurrency < 0 {
 			return cfg, fmt.Errorf("cloud maxConcurrency %d: must not be negative", cfg.Cloud.MaxConcurrency)
+		}
+		switch strings.ToLower(cfg.Cloud.Tokenizer) {
+		case "", "backend", "tiktoken":
+		default:
+			return cfg, fmt.Errorf("cloud tokenizer %q: must be \"backend\" or \"tiktoken\"", cfg.Cloud.Tokenizer)
 		}
 	}
 	return cfg, nil

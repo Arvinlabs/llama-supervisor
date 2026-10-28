@@ -20,7 +20,7 @@ type Observation struct {
 	Total         int // prompt + completion
 	DraftN        int // MTP/speculative draft tokens attempted (0 when not reported)
 	DraftAccepted int // MTP/speculative draft tokens accepted (0 when not reported)
-	// Cloud reports that the completion was served by the cloud fallback backend
+	// Cloud reports that the completion was served by the cloud backend
 	// instead of the local one. Stats accounts it in the day's cloud counters; a
 	// consumer that only judges the local model (the watchdog) never receives a
 	// cloud observation at all, unless it opts in via CloudConsumer

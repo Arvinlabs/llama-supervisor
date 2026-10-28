@@ -30,6 +30,7 @@ func TestLoadConfigValidatesCloudFields(t *testing.T) {
 		{"negative estimateMargin", "backend: http://127.0.0.1:8080\ncloud:\n  estimateMargin: -1.5\n"},
 		{"missing apiKey", "backend: http://127.0.0.1:8080\ncloud:\n  enable: true\n  baseUrl: https://api.deepseek.com\n"},
 		{"bad baseUrl", "backend: http://127.0.0.1:8080\ncloud:\n  enable: true\n  baseUrl: api.deepseek.com\n  apiKey: sk-x\n"},
+		{"unknown tokenizer", "backend: http://127.0.0.1:8080\ncloud:\n  tokenizer: heuristics\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -53,6 +54,8 @@ cloud:
   outputReserve: 1024
   estimateMargin: 1.15
   maxConcurrency: 8
+  tokenizer: "tiktoken"
+  tiktokenModel: "gpt-4o"
 `)
 	if err != nil {
 		t.Fatalf("valid config rejected: %v", err)
@@ -62,6 +65,9 @@ cloud:
 	}
 	if got := cfg.Cloud.MaxConcurrency; got != 8 {
 		t.Fatalf("maxConcurrency = %d", got)
+	}
+	if got := cfg.Cloud.Tokenizer; got != "tiktoken" {
+		t.Fatalf("tokenizer = %q, want the configured tiktoken", got)
 	}
 	if got := CloudEstimateMargin(cfg); got != 1.15 {
 		t.Fatalf("estimateMargin = %v, want the configured 1.15", got)
@@ -87,5 +93,8 @@ cloud:
 	}
 	if got := CloudEstimateMargin(cfg); got != 1 {
 		t.Fatalf("estimateMargin = %v, want 1 (default)", got)
+	}
+	if got := cfg.Cloud.Tokenizer; got != "" {
+		t.Fatalf("tokenizer = %q, want empty (tiktoken by default)", got)
 	}
 }

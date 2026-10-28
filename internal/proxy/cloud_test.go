@@ -64,7 +64,7 @@ func (c *completionRecorder) body(path string) string {
 // fakeTokenize stands in for the local backend's POST /tokenize: it reports one
 // token per 4 characters of the prompt text, so the routing arithmetic of the
 // tests stays readable (the prompts are all latin). The estimator has no
-// fallback, so every fake backend that must be able to route needs it
+// other counter, so every fake backend that must be able to route needs it
 func fakeTokenize(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Content string `json:"content"`
@@ -86,8 +86,9 @@ func fakeTokenize(w http.ResponseWriter, r *http.Request) {
 }
 
 // cloudTestConfig builds a cloud-enabled config: local n_ctx 4096 (override, no
-// probing), threshold 0.9. The fake local backends serve POST /tokenize (see
-// completionRecorder), which the estimator depends on exclusively
+// probing), threshold 0.9. The tokenizer is pinned to "backend": the fake local
+// backends serve a deterministic POST /tokenize (see completionRecorder), and
+// the tiktoken option is tested separately
 func cloudTestConfig(localURL, cloudURL string, mut func(*config.CloudGroup)) config.Config {
 	g := &config.CloudGroup{
 		Enable:         true,
@@ -95,6 +96,7 @@ func cloudTestConfig(localURL, cloudURL string, mut func(*config.CloudGroup)) co
 		APIKey:         "sk-cloud",
 		Model:          "cloud-model",
 		LocalMaxTokens: 4096,
+		Tokenizer:      "backend",
 	}
 	if mut != nil {
 		mut(g)
@@ -793,6 +795,76 @@ func TestCloudKeepsRequestLocalWhenEstimationFails(t *testing.T) {
 	}
 	if got := local.body(completionsPath); got != string(bigChatBody('h', 20000)) {
 		t.Fatalf("the local request body was altered: %d bytes", len(got))
+	}
+}
+
+// the tokenizer option defaults to tiktoken: an unset option picks the local
+// counter (it must count even though the configured backend is unreachable),
+// only an explicit "backend" uses the backend's /tokenize
+func TestCloudEstimatorTokenizerDefaultsToTiktoken(t *testing.T) {
+	cfg := config.Config{Backend: "http://127.0.0.1:1", Cloud: &config.CloudGroup{}}
+	est, name := newCloudEstimator(cfg, cfg.Backend)
+	// the empty model name resolves to the cl100k_base encoding, which the name reports
+	if name != "tiktoken/cl100k_base" {
+		t.Fatalf("default tokenizer = %q, want tiktoken/cl100k_base", name)
+	}
+	if _, err := est.Estimate(context.Background(), []byte(`{"messages":[{"role":"user","content":"hi"}]}`)); err != nil {
+		t.Fatalf("the default (tiktoken) estimator must count without a reachable backend: %v", err)
+	}
+	cfg.Cloud.Tokenizer = "backend"
+	if _, name := newCloudEstimator(cfg, cfg.Backend); name != "backend" {
+		t.Fatalf("explicit tokenizer = %q, want backend", name)
+	}
+}
+
+// the tiktoken tokenizer option counts the prompt locally (cl100k_base, no
+// backend round-trip): the routing decision works even on a backend that has
+// no /tokenize endpoint at all - the counter-part of the test above
+func TestCloudTiktokenTokenizerNeedsNoBackend(t *testing.T) {
+	local := &completionRecorder{}
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case completionsPath:
+			local.handler()(w, r)
+		default:
+			http.NotFound(w, r) // no /tokenize (and no /props: n_ctx is overridden)
+		}
+	}))
+	defer localSrv.Close()
+	cloud := &completionRecorder{}
+	cloudSrv := httptest.NewServer(cloud.handler())
+	defer cloudSrv.Close()
+
+	mut := func(g *config.CloudGroup) { g.Tokenizer = "tiktoken" }
+	sup := New(cloudTestConfig(localSrv.URL, cloudSrv.URL, mut), context.Background())
+	srv := httptest.NewServer(sup)
+	defer srv.Close()
+
+	// 40000 'h's ~ 4000 cl100k tokens + 1024 reserve > 4096 * 0.9: to the cloud
+	resp, err := http.Post(srv.URL+completionsPath, "application/json", bytes.NewReader(bigChatBody('h', 40000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if cloud.hit(completionsPath) != 1 || local.hit(completionsPath) != 0 {
+		t.Fatalf("cloud hits = %d (want 1), local hits = %d (want 0)",
+			cloud.hit(completionsPath), local.hit(completionsPath))
+	}
+
+	// a small prompt still stays local: the tiktoken count is real, not a guess
+	resp, err = http.Post(srv.URL+completionsPath, "application/json", bytes.NewReader(bigChatBody('h', 100)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if cloud.hit(completionsPath) != 1 || local.hit(completionsPath) != 1 {
+		t.Fatalf("cloud hits = %d (want 1), local hits = %d (want 2)",
+			cloud.hit(completionsPath), local.hit(completionsPath))
 	}
 }
 

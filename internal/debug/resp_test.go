@@ -219,9 +219,9 @@ func TestTapResponseStream(t *testing.T) {
 	}
 }
 
-// a streaming body that is not a chat completion (no chunks with choices) falls back to
+// a streaming body that is not a chat completion (no chunks with choices) is stored as
 // the raw SSE events
-func TestTapResponseStreamFallback(t *testing.T) {
+func TestTapResponseStreamNonChat(t *testing.T) {
 	p := &Policy{respSavePath: t.TempDir()}
 	sse := "data: [DONE]\n\n"
 	res := &http.Response{

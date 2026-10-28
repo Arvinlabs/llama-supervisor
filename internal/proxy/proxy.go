@@ -31,7 +31,7 @@ type Supervisor struct {
 	backendURL  string
 	backendAddr string // backend host:port (validated at startup, must carry an explicit port)
 
-	cloudRoute *cloudRouter           // cloud fallback router (nil when the cloud is disabled)
+	cloudRoute *cloudRouter           // cloud router (nil when the cloud is disabled)
 	cloudProxy *httputil.ReverseProxy // the second reverse proxy, to the cloud endpoint
 
 	hub     *observe.Hub // completion observation hub; stats and watchdog subscribe to it
@@ -128,7 +128,7 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		}
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
 	}
-	// cloud fallback: a second reverse proxy to the cloud endpoint. It runs the same
+	// cloud routing: a second reverse proxy to the cloud endpoint. It runs the same
 	// outbound pipeline as the local one (request policy, usage injection, response
 	// wraps) plus the cloud-specific rewrites (auth, model, sanitize), and its
 	// response tap carries a nil error guard: a cloud error payload must not trigger
@@ -140,6 +140,8 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 			log.Fatalf("cloud baseUrl %q: %v", cfg.Cloud.BaseURL, cerr)
 		}
 		p.cloudRoute = newCloudRouter(cfg, cfg.Backend)
+		log.Printf("[cloud] routing enabled: baseUrl %s, tokenizer %s",
+			cfg.Cloud.BaseURL, p.cloudRoute.tokenizerName)
 		crp := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.SetURL(cloud)
@@ -313,7 +315,7 @@ func (b *ctxBody) watch() {
 	}()
 }
 
-// ServeHTTP handles an incoming request: route first (cloud fallback when the request
+// ServeHTTP handles an incoming request: route first (to the cloud when the request
 // does not fit the local context, local otherwise), then - for a local request only -
 // refresh the idle trackers and run the probe when the idle timeout was crossed (on an
 // unhealthy verdict it runs the command and waits for the backend to be ready), forward,
@@ -331,7 +333,7 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.debug.Tap(r) // no-op when debug.savePath is not set
 	}
 	rec := &statusRecorder{ResponseWriter: w}
-	// cloud fallback: the router buffers the body (reinstalled either way) and reports
+	// cloud routing: the router buffers the body (reinstalled either way) and reports
 	// whether the request does not fit the local context window
 	routeToCloud := false
 	if p.cloudRoute != nil {

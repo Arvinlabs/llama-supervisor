@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -71,18 +72,34 @@ type cloudRouter struct {
 	estimateMargin float64
 	localCtx       *localctx.Provider
 	estimator      *tokenest.Estimator
+	tokenizerName  string        // the counter that feeds the estimate ("backend" / "tiktoken/<encoding>"), for the logs
 	sem            chan struct{} // cloud concurrency slots; nil means unlimited
 	warnThrottle   atomic.Int64  // seconds of the last "context window unknown" warning (rate limit)
 }
 
+// newCloudEstimator builds the prompt-size estimator from the cloud group's
+// tokenizer option: tiktoken by default, counting the text locally with the
+// OpenAI-compatible BPE encoding (no backend dependency for the count); the
+// local backend's own tokenizer when cloud.tokenizer is "backend". It
+// reports the counter's name ("tiktoken" / "backend") for the logs
+func newCloudEstimator(cfg config.Config, backend string) (*tokenest.Estimator, string) {
+	if strings.EqualFold(cfg.Cloud.Tokenizer, "backend") {
+		return tokenest.New(backend, cfg.ApiKey), "backend"
+	}
+	est := tokenest.NewTiktoken(cfg.Cloud.TiktokenModel)
+	return est, est.CounterName() // the encoding actually in use, e.g. "tiktoken/cl100k_base"
+}
+
 func newCloudRouter(cfg config.Config, backend string) *cloudRouter {
+	estimator, tokenizerName := newCloudEstimator(cfg, backend)
 	cr := &cloudRouter{
 		cfg:            *cfg.Cloud,
 		threshold:      config.CloudThreshold(cfg),
 		outputReserve:  config.CloudOutputReserve(cfg),
 		estimateMargin: config.CloudEstimateMargin(cfg),
 		localCtx:       localctx.New(backend, cfg.ApiKey, cfg.Cloud.LocalMaxTokens),
-		estimator:      tokenest.New(backend, cfg.ApiKey),
+		estimator:      estimator,
+		tokenizerName:  tokenizerName,
 	}
 	if n := cfg.Cloud.MaxConcurrency; n > 0 {
 		cr.sem = make(chan struct{}, n)
@@ -137,7 +154,8 @@ func (cr *cloudRouter) Route(ctx context.Context, r *http.Request) bool {
 	}
 	_ = orig.Close()
 	defer restoreBody(r, body)
-	// the size comes from the local backend's tokenizer and nowhere else: when it
+	// the size comes from the configured tokenizer (the local backend's own
+	// tokenizer, or the local tiktoken encoding) and nowhere else: when it
 	// cannot be obtained the request is not judged and stays local
 	est, estErr := cr.estimator.Estimate(ctx, body)
 	if estErr != nil {
@@ -163,9 +181,9 @@ func (cr *cloudRouter) Route(ctx context.Context, r *http.Request) bool {
 	// are only approximated): it is scaled by the margin before the decision, the
 	// exact output reserve is not
 	route := int(float64(est.Tokens)*cr.estimateMargin)+reserve > limit
-	log.Printf("[cloud] est=%d (raw %d, margin %g, images %d, msgs %d, calls %d, tools %dB, reserve %d) limit=%d (n_ctx=%d) -> %s",
+	log.Printf("[cloud] est=%d (raw %d, margin %g, images %d, msgs %d, calls %d, tools %dB, reserve %d, tokenizer %s) limit=%d (n_ctx=%d) -> %s",
 		int(float64(est.Tokens)*cr.estimateMargin)+reserve, est.Tokens, cr.estimateMargin,
-		est.Images, est.NMsg, est.Calls, est.Tools, reserve, limit, nctx, targetName(route))
+		est.Images, est.NMsg, est.Calls, est.Tools, reserve, cr.tokenizerName, limit, nctx, targetName(route))
 	return route
 }
 

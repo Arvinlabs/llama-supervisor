@@ -1,5 +1,5 @@
 // Package localctx detects the local llama.cpp backend's context window (n_ctx):
-// the threshold the cloud fallback router compares request sizes against. The
+// the threshold the cloud router compares request sizes against. The
 // value is cached with a TTL because the supervisor itself restarts the backend
 // (n_ctx may change with the startup parameters), and a failing probe falls back
 // to the stale value rather than blinding the router
