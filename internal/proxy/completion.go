@@ -237,6 +237,14 @@ func (b *completionTap) publish(o observe.Observation) {
 	o.Cloud = b.cloud
 	b.hub.Notify(o)
 	b.done = true
+	// per-request token accounting: input (prompt) and output (completion) tokens,
+	// plus the input prefix cache hit, at the end of the request (the usage chunk of
+	// a stream arrives as its last event)
+	src := "local"
+	if b.cloud {
+		src = "cloud"
+	}
+	log.Printf("[usage] %s prompt=%d prompt_cached=%d completion=%d total=%d", src, o.Prompt, o.Cached, o.Completion, o.Total)
 	// the stream buffer is only released once the scan is guaranteed to stop (no guard
 	// still waiting for a trailing error event); the non-stream buf is released at EOF
 	if b.guard == nil {
