@@ -351,6 +351,7 @@
     </div>
     <script>
         function k(n) { return (n / 1000).toFixed(2) + "k"; }
+        function m(n) { return (n / 1e6).toFixed(2) + "M"; }
         function hit(input, cached) { return input > 0 ? (cached / input * 100).toFixed(2) + "%" : "-"; }
         function fmtNum(n) { return n.toLocaleString("en-US"); }
         function pad2(n) { return (n < 10 ? "0" : "") + n; }
@@ -429,7 +430,7 @@
             const cloud = cloudOf(x);
             col.classList.add("active");
             tip.innerHTML =
-                '<div class="tt-head"><span>' + label + '</span><span>' + fmtNum(x.total) + '</span></div>' +
+                '<div class="tt-head"><span>' + label + '</span><span>' + m(x.total) + '</span></div>' +
                 '<div class="tt-row"><span class="tt-sw" style="background:var(--cache)"></span><span class="tt-label">input (cached)</span><span class="tt-val">' + fmtNum(x.input_cache) + '</span></div>' +
                 '<div class="tt-row"><span class="tt-sw" style="background:var(--input)"></span><span class="tt-label">input (not cached)</span><span class="tt-val">' + fmtNum(Math.max(0, x.input - x.input_cache)) + '</span></div>' +
                 '<div class="tt-row"><span class="tt-sw" style="background:var(--output)"></span><span class="tt-label">output</span><span class="tt-val">' + fmtNum(x.output) + '</span></div>' +
@@ -512,7 +513,7 @@
                 if (hourDay) {
                     const hrows = hourRows(hourDay);
                     document.getElementById("hour-title").textContent = "Today";
-                    document.getElementById("hour-total").textContent = k(hourDay.total);
+                    document.getElementById("hour-total").textContent = m(hourDay.total);
                     renderChart("chart-hours", "tip-hours", hrows,
                         x => hourDay.date + " " + pad2(x.hour) + ":00",
                         x => (x.hour % 4 === 0) ? pad2(x.hour) : null);
@@ -549,7 +550,7 @@
                         "<td>" + sumCloud.requests + "</td><td>" + k(sumCloud.total) + "</td>" +
                         "<td>" + hit(sum.input, sum.input_cache) + "</td>";
                     tb.appendChild(tr);
-                    document.getElementById("card-total").textContent = k(sum.total);
+                    document.getElementById("card-total").textContent = m(sum.total);
                 }
                 document.getElementById("panel").hidden = rows.length === 0;
                 document.getElementById("t").hidden = rows.length === 0;
