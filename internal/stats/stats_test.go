@@ -231,7 +231,7 @@ func TestHandleServesPageAndData(t *testing.T) {
 	}
 
 	// the page must not trigger a favicon request from the browser
-	if !strings.Contains(w.Body.String(), `<link rel="icon" href="data:,">`) {
+	if !strings.Contains(w.Body.String(), `<link rel="icon" href="data:image/svg+xml,`) {
 		t.Fatalf("page must carry an inline icon: %q", w.Body.String())
 	}
 
