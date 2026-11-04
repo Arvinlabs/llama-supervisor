@@ -390,6 +390,52 @@ func TestControlEndpoint(t *testing.T) {
 	}
 }
 
+// a successful control command switches the backend liveness state at once
+// (up for start, down for stop); a failing command leaves it untouched
+func TestControlSwitchesHealthState(t *testing.T) {
+	p := New(&config.StatsGroup{
+		Enable: true, SavePath: t.TempDir(),
+		StartCommand: "true", StopCommand: "true",
+	}, context.Background())
+	var state bool
+	p.SetHealthSetter(func(up bool) { state = up })
+
+	// a running start command switches the state to up
+	w := httptest.NewRecorder()
+	if !p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=start", nil)) {
+		t.Fatal("/stats/control must be handled")
+	}
+	if !state {
+		t.Fatalf("a successful start must switch the health state to up")
+	}
+
+	// a running stop command switches the state to down
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=stop", nil))
+	if state {
+		t.Fatalf("a successful stop must switch the health state to down")
+	}
+
+	// a failing command must not touch the state
+	p.stopCmd = "exit 3"
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=stop", nil))
+	if state {
+		t.Fatalf("a failing command must not switch the health state")
+	}
+
+	// without a setter the control endpoint still works
+	p2 := New(&config.StatsGroup{Enable: true, SavePath: t.TempDir(), StartCommand: "true"}, context.Background())
+	w = httptest.NewRecorder()
+	_ = p2.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=start", nil))
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || !resp.OK {
+		t.Fatalf("start without a health setter must still succeed: %s", w.Body.String())
+	}
+}
+
 // Days returns the parsed day files newest first and skips non-day files
 func TestDaysNewestFirst(t *testing.T) {
 	p := newTestPolicy(t, 30)

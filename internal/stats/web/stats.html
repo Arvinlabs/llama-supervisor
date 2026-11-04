@@ -62,10 +62,6 @@
             color: #c00;
         }
 
-        .ok {
-            color: #0a7d2c;
-        }
-
         .panel {
             max-width: 1200px;
             margin: 0 auto 1.5rem;
@@ -519,14 +515,6 @@
             return rows;
         }
 
-        // setMsg shows a transient message: class "ok" for success, "err" for failure
-        function setMsg(text, ok) {
-            const m = document.getElementById("err");
-            m.textContent = text;
-            m.className = ok ? "ok" : "err";
-            if (ok) setTimeout(() => { if (m.textContent === text) m.textContent = ""; }, 5000);
-        }
-
         // backendUp is the last liveness state reported by /stats/data (hasHealth
         // false: no state reported, the buttons are never gated); when a state
         // is known the start button is enabled only while the backend is down
@@ -546,24 +534,16 @@
             document.getElementById("btn-stop").disabled = !backendUp;
         }
 
-        // control runs a backend start/stop command on the server and shows the outcome;
-        // the buttons stay disabled while a command runs, then revert to the health state
+        // control runs a backend start/stop command on the server; the buttons stay
+        // disabled while a command runs, then the page refreshes (load) and reverts
+        // to the (refreshed) health state; no outcome message is shown
         async function control(action) {
             const btns = [document.getElementById("btn-start"), document.getElementById("btn-stop")];
             btns.forEach(b => b.disabled = true);
             try {
-                const r = await fetch("/stats/control?action=" + action, { method: "POST" });
-                let d = {};
-                try { d = await r.json(); } catch (e) { /* non-JSON error body */ }
-                if (r.ok && d.ok) {
-                    setMsg(action + " ok", true);
-                    backendUp = action === "start";
-                } else {
-                    setMsg(action + " failed: " + (d.message || "HTTP " + r.status), false);
-                }
-            } catch (e) {
-                setMsg(action + " failed: " + e.message, false);
-            } finally {
+                await fetch("/stats/control?action=" + action, { method: "POST" });
+            } catch (e) { /* a failed command just leaves the state as is */ } finally {
+                await load(); // the command finished: refresh the page (health state and stats)
                 applyButtons();
             }
         }

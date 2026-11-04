@@ -80,6 +80,7 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 		p.stats = stats.New(cfg.Stats, ctx)
 		p.hub.Register(p.stats)
 		p.stats.SetHealth(p.health.up)
+		p.stats.SetHealthSetter(p.health.set) // a successful /stats control command switches the liveness state at once
 	}
 	// the completion tap is always wired via the Rewrite API (Director has no request hook):
 	// SetURL routes to the backend, the request policy rewrites it, then injectUsage forces

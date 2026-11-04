@@ -83,7 +83,14 @@ type Policy struct {
 	stopCmd    string          // shell command that stops the backend (empty: button hidden)
 	ctrlMu     sync.Mutex      // at most one control command runs at a time
 	health     func() bool     // backend liveness provider (nil: the state is not reported)
+	setHealth  func(bool)      // backend liveness setter (nil: the state cannot be overridden); a successful control command applies its expected state immediately
 }
+
+// SetHealthSetter installs the backend liveness setter (owned by the
+// supervisor's health probe): when a control command finishes successfully the
+// probe state is switched at once (up for start, down for stop) instead of
+// waiting for the next health poll
+func (p *Policy) SetHealthSetter(f func(bool)) { p.setHealth = f }
 
 // SetHealth installs the backend liveness provider (owned by the supervisor's
 // health probe): its current state is served with /stats/data so the page can
@@ -272,6 +279,11 @@ func (p *Policy) handleControl(w http.ResponseWriter, r *http.Request) {
 	defer p.ctrlMu.Unlock()
 
 	ok := command.RunCommand(p.ctx, "stats-control "+action, cmd)
+	if ok && p.setHealth != nil {
+		// the command succeeded: apply the expected backend state (up for
+		// start, down for stop) to the liveness tracker immediately
+		p.setHealth(action == "start")
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":      ok,
