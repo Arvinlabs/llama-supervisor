@@ -45,7 +45,10 @@ type Supervisor struct {
 	probe     *probe.Policy      // probe policy (nil when probe is disabled)
 	watchdog  *watchdog.Policy   // watchdog policy (nil when watchdog is disabled)
 	request   *request.Policy    // request policy (nil when no request sub-feature is enabled)
-	stats     *stats.Policy      // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
+	stats          *stats.Policy    // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
+	health         *backendHealth   // backend-port liveness tracker (healthInterval)
+	healthInterval time.Duration    // interval between backend liveness polls
+	cloudFallback  bool             // route to the cloud when the local backend is down (cloud.fallback)
 	debug     *debug.Policy      // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
 	errguard  *errguard.Policy   // error guard policy (nil when disabled); runs the command when a tapped backend error message matches a pattern
 	anthropic *anthropic.Handler // Anthropic /v1/messages handler (nil when the anthropic protocol is disabled)
@@ -68,9 +71,15 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	if cfg.Request.Enabled() {
 		p.request = request.New(cfg.Request, cfg.ApiKey)
 	}
+	// the backend liveness tracker (independent of stats): it starts optimistic
+	// (up) so that the first poll cannot storm requests to the cloud before
+	// anything is known
+	p.health = &backendHealth{alive: true}
+	p.healthInterval = config.HealthInterval(cfg)
 	if cfg.Stats.Enabled() {
-		p.stats = stats.New(cfg.Stats)
+		p.stats = stats.New(cfg.Stats, ctx)
 		p.hub.Register(p.stats)
+		p.stats.SetHealth(p.health.up)
 	}
 	// the completion tap is always wired via the Rewrite API (Director has no request hook):
 	// SetURL routes to the backend, the request policy rewrites it, then injectUsage forces
@@ -190,6 +199,9 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	// in to cloud traffic (stats), so the watchdog never touches cloud traffic
 	p.observe = p.hub.Len() > 0
 	p.observeCloud = p.hub.CloudLen() > 0
+	// the cloud fallback (route to the cloud when the local backend is down)
+	// needs a cloud route
+	p.cloudFallback = cfg.Cloud.Enabled() && config.CloudFallback(cfg)
 	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.cloudRoute == nil && p.anthropic == nil && p.stats == nil && p.debug == nil && p.errguard == nil {
 		log.Print("[config] restart, probe, watchdog, request, cloud, anthropic, stats, debug and errguard all disabled, proxying only")
 	}
@@ -337,7 +349,15 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// whether the request does not fit the local context window
 	routeToCloud := false
 	if p.cloudRoute != nil {
-		routeToCloud = p.cloudRoute.Route(ctx, r)
+		if p.cloudFallback && !p.health.up() {
+			// the local backend is down: skip the size-based decision (it would
+			// need the dead backend's tokenizer/context anyway) and go to the
+			// cloud with the body untouched
+			log.Printf("[cloud] local backend down, falling back to the cloud: %s %s", r.Method, r.URL.Path)
+			routeToCloud = true
+		} else {
+			routeToCloud = p.cloudRoute.Route(ctx, r)
+		}
 	}
 	// only a request that actually goes to the local model is backend activity: it
 	// refreshes the restart/probe idle timers, and if the probe idle timeout was crossed
@@ -387,6 +407,7 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // StartBackground starts the background checkers:
 // restart checks once per second and runs restart.command when the idle deadline is crossed, periodically repeatable.
+// the backend liveness probe dials the backend port once at startup and then every stats.healthInterval.
 // (the watchdog's /slots sampling is request-driven and runs inside the watchdog policy itself)
 func (p *Supervisor) StartBackground(ctx context.Context) {
 	if p.restart != nil {
@@ -402,6 +423,55 @@ func (p *Supervisor) StartBackground(ctx context.Context) {
 				}
 			}
 		}()
+	}
+	if p.health != nil {
+		go p.pollHealth(ctx)
+	}
+}
+
+// backendHealth tracks whether the backend's TCP port accepts connections;
+// the initial state is optimistic (up) until the first poll settles it
+type backendHealth struct {
+	mu    sync.RWMutex
+	alive bool
+}
+
+func (h *backendHealth) set(alive bool) {
+	h.mu.Lock()
+	h.alive = alive
+	h.mu.Unlock()
+}
+
+func (h *backendHealth) up() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.alive
+}
+
+// pollHealth dials the backend port once at startup and then every
+// healthInterval; only state changes are logged
+func (p *Supervisor) pollHealth(ctx context.Context) {
+	ticker := time.NewTicker(p.healthInterval)
+	defer ticker.Stop()
+	check := func() {
+		conn, err := net.DialTimeout("tcp", p.backendAddr, 2*time.Second)
+		up := err == nil
+		if up {
+			_ = conn.Close()
+		}
+		if p.health.up() != up {
+			log.Printf("[health] backend %s is %s", p.backendAddr, map[bool]string{true: "up", false: "down"}[up])
+			p.health.set(up)
+		}
+	}
+	check()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			check()
+		}
 	}
 }
 

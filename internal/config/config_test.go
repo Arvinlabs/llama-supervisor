@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // writeConfig writes a config file into a temp dir and loads it
@@ -96,5 +97,31 @@ cloud:
 	}
 	if got := cfg.Cloud.Tokenizer; got != "" {
 		t.Fatalf("tokenizer = %q, want empty (tiktoken by default)", got)
+	}
+}
+
+// the backend health poll interval defaults to 120s (a configured value
+// wins); the cloud down-fallback defaults to true
+func TestHealthIntervalAndCloudFallbackDefaults(t *testing.T) {
+	if got := HealthInterval(Config{}); got != 120*time.Second {
+		t.Fatalf("default health interval = %s, want 120s", got)
+	}
+	cfg := Config{HealthInterval: 30}
+	if got := HealthInterval(cfg); got != 30*time.Second {
+		t.Fatalf("configured health interval = %s, want 30s", got)
+	}
+	if !CloudFallback(Config{}) {
+		t.Fatal("cloud fallback must default to true")
+	}
+	if !CloudFallback(Config{Cloud: &CloudGroup{}}) {
+		t.Fatal("cloud fallback must default to true with an unset field")
+	}
+	f := false
+	if CloudFallback(Config{Cloud: &CloudGroup{Fallback: &f}}) {
+		t.Fatal("an explicit fallback: false must disable the fallback")
+	}
+	tr := true
+	if !CloudFallback(Config{Cloud: &CloudGroup{Fallback: &tr}}) {
+		t.Fatal("an explicit fallback: true must keep the fallback")
 	}
 }

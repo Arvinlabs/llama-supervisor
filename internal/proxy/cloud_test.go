@@ -173,6 +173,123 @@ func TestCloudKeepsSmallRequestLocal(t *testing.T) {
 	}
 }
 
+// the down fallback: while the health probe reports the local backend down,
+// every small chat completion goes straight to the cloud (skipping the size
+// decision); when the backend is up again the normal routing applies, and an
+// explicit cloud.fallback=false keeps sending the request to the dead backend
+func TestCloudFallbackWhenBackendDown(t *testing.T) {
+	local := &completionRecorder{}
+	localSrv := httptest.NewServer(local.handler())
+	defer localSrv.Close()
+	cloud := &completionRecorder{}
+	cloudSrv := httptest.NewServer(cloud.handler())
+	defer cloudSrv.Close()
+
+	cfg := cloudTestConfig(localSrv.URL, cloudSrv.URL, nil)
+	sup := New(cfg, context.Background())
+	srv := httptest.NewServer(sup)
+	defer srv.Close()
+	post := func() {
+		resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json",
+			bytes.NewBufferString(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+	}
+
+	// the tracker starts optimistic (up): a small request stays local
+	post()
+	if local.hit("/v1/chat/completions") != 1 || cloud.hit("/v1/chat/completions") != 0 {
+		t.Fatalf("healthy: local hits = %d (want 1), cloud hits = %d (want 0)",
+			local.hit("/v1/chat/completions"), cloud.hit("/v1/chat/completions"))
+	}
+	// backend down: the same small request falls back to the cloud
+	sup.health.set(false)
+	post()
+	if cloud.hit("/v1/chat/completions") != 1 || local.hit("/v1/chat/completions") != 1 {
+		t.Fatalf("down: cloud hits = %d (want 1), local hits = %d (want 1)",
+			cloud.hit("/v1/chat/completions"), local.hit("/v1/chat/completions"))
+	}
+	// backend up again: the normal size-based routing applies
+	sup.health.set(true)
+	post()
+	if local.hit("/v1/chat/completions") != 2 || cloud.hit("/v1/chat/completions") != 1 {
+		t.Fatalf("up: local hits = %d (want 2), cloud hits = %d (want 1)",
+			local.hit("/v1/chat/completions"), cloud.hit("/v1/chat/completions"))
+	}
+
+	// the fallback can be switched off: a dead backend then just gets a 502
+	localSrv.Close()
+	noFallback := false
+	cfg2 := cloudTestConfig(localSrv.URL, cloudSrv.URL, func(g *config.CloudGroup) { g.Fallback = &noFallback })
+	sup2 := New(cfg2, context.Background())
+	sup2.health.set(false)
+	srv2 := httptest.NewServer(sup2)
+	defer srv2.Close()
+	resp, err := http.Post(srv2.URL+"/v1/chat/completions", "application/json",
+		bytes.NewBufferString(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("fallback off, backend down: status = %d, want 502", resp.StatusCode)
+	}
+	if cloud.hit("/v1/chat/completions") != 1 {
+		t.Fatalf("fallback off must never route to the cloud: cloud hits = %d (want 1)",
+			cloud.hit("/v1/chat/completions"))
+	}
+}
+
+// the health probe dials the backend port: an unreachable port flips the state
+// to down, a reachable one flips it back to up
+func TestPollHealthDialsBackendPort(t *testing.T) {
+	local := &completionRecorder{}
+	localSrv := httptest.NewServer(local.handler())
+
+	cfg := cloudTestConfig(localSrv.URL, localSrv.URL, func(g *config.CloudGroup) { g.Enable = false })
+	sup := New(cfg, context.Background())
+	// the supervisor has no health tracker without stats: build one directly
+	sup.health = &backendHealth{alive: true}
+	sup.healthInterval = 100 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.pollHealth(ctx)
+	settle := func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// the immediate first check sees a reachable port: the state stays up
+	settle()
+	if !sup.health.up() {
+		t.Fatal("reachable backend must report up")
+	}
+
+	localSrv.Close()
+	settle()
+	if sup.health.up() {
+		t.Fatal("unreachable backend must report down")
+	}
+
+	// a new reachable port flips the state back to up
+	local2 := &completionRecorder{}
+	localSrv2 := httptest.NewServer(local2.handler())
+	defer localSrv2.Close()
+	sup.backendAddr = localSrv2.Listener.Addr().String()
+	settle()
+	if !sup.health.up() {
+		t.Fatal("reachable backend must flip the state back to up")
+	}
+}
+
 func TestCloudRoutesOnLargeMaxTokens(t *testing.T) {
 	local := &completionRecorder{}
 	localSrv := httptest.NewServer(local.handler())

@@ -58,6 +58,7 @@ func main() {
 
 	log.Printf("llama-supervisor %s (built %s, %s)", Version, BuildTime, runtime.Version())
 	log.Print("[config] apiKey=" + config.SecretMask(cfg.ApiKey))
+	log.Printf("[config] backend health probe: interval=%ds", int(config.HealthInterval(cfg).Seconds()))
 
 	if cfg.Restart.Enabled() {
 		log.Printf("[config] restart enabled: interval=%ds",
@@ -108,15 +109,21 @@ func main() {
 		if cfg.Cloud.MaxConcurrency > 0 {
 			conc = strconv.Itoa(cfg.Cloud.MaxConcurrency)
 		}
-		log.Printf("[config] cloud enabled: baseUrl=%s model=%q key=%s threshold=%.2f outputReserve=%d localMaxTokens=%d maxConcurrency=%s",
+		log.Printf("[config] cloud enabled: baseUrl=%s model=%q key=%s threshold=%.2f outputReserve=%d localMaxTokens=%d maxConcurrency=%s fallback=%v",
 			cfg.Cloud.BaseURL, cfg.Cloud.Model, config.SecretMask(cfg.Cloud.APIKey),
 			config.CloudThreshold(cfg), config.CloudOutputReserve(cfg),
-			cfg.Cloud.LocalMaxTokens, conc)
+			cfg.Cloud.LocalMaxTokens, conc, config.CloudFallback(cfg))
 	} else {
 		log.Print("[config] cloud disabled")
 	}
 	if cfg.Stats.Enabled() {
 		log.Printf("[config] stats enabled: savePath=%s retainDays=%d page=/stats", cfg.Stats.SavePath, config.StatsRetainDays(cfg))
+		if cfg.Stats.StartCommand != "" {
+			log.Print("[config] stats start command: " + cfg.Stats.StartCommand)
+		}
+		if cfg.Stats.StopCommand != "" {
+			log.Print("[config] stats stop command: " + cfg.Stats.StopCommand)
+		}
 	} else {
 		log.Print("[config] stats disabled")
 	}

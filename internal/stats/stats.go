@@ -2,6 +2,7 @@ package stats
 
 import (
 	_ "embed"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Arvinlabs/llama-supervisor/internal/command"
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
 	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 )
@@ -75,7 +77,18 @@ type Policy struct {
 	retainDays int
 	mu         sync.Mutex // serializes the read-merge-write of the day file
 	lastPurge  string     // local date of the last purge; the dir is re-scanned at most once a day
+
+	ctx        context.Context // server-level ctx the control commands run under
+	startCmd   string          // shell command that starts the backend (empty: button hidden)
+	stopCmd    string          // shell command that stops the backend (empty: button hidden)
+	ctrlMu     sync.Mutex      // at most one control command runs at a time
+	health     func() bool     // backend liveness provider (nil: the state is not reported)
 }
+
+// SetHealth installs the backend liveness provider (owned by the supervisor's
+// health probe): its current state is served with /stats/data so the page can
+// enable the start/stop buttons only for the missing state
+func (p *Policy) SetHealth(f func() bool) { p.health = f }
 
 // compile-time proofs: stats consumes local and cloud completions alike
 var (
@@ -89,12 +102,13 @@ func (p *Policy) ConsumeCloud() bool { return true }
 
 // New builds the policy, creates the save directory and purges expired day
 // files. It exits on failure: a configured stats policy must work.
-func New(g *config.StatsGroup) *Policy {
+func New(g *config.StatsGroup, ctx context.Context) *Policy {
 	retainDays := g.RetainDays
 	if retainDays <= 0 {
 		retainDays = defaultRetainDays
 	}
-	p := &Policy{savePath: g.SavePath, retainDays: retainDays}
+	p := &Policy{savePath: g.SavePath, retainDays: retainDays,
+		ctx: ctx, startCmd: g.StartCommand, stopCmd: g.StopCommand}
 	if err := os.MkdirAll(g.SavePath, 0o755); err != nil {
 		log.Fatalf("[stats] create save dir %s: %v", g.SavePath, err)
 	}
@@ -193,9 +207,9 @@ func (p *Policy) Days() ([]dayStats, error) {
 	return days, nil
 }
 
-// Handle serves the embedded stats page on /stats and its JSON data on
-// /stats/data; it reports whether the request was one of them (otherwise the
-// request is left untouched to be proxied)
+// Handle serves the embedded stats page on /stats, its JSON data on /stats/data
+// and the backend control endpoint on /stats/control; it reports whether the
+// request was one of them (otherwise the request is left untouched to be proxied)
 func (p *Policy) Handle(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
 	case "/stats", "/stats/":
@@ -209,11 +223,60 @@ func (p *Policy) Handle(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(map[string][]dayStats{"days": days})
+		data := map[string]any{
+			"days": days,
+			// whether the page's start/stop buttons are available
+			"start": p.startCmd != "",
+			"stop":  p.stopCmd != "",
+		}
+		if p.health != nil {
+			// whether the backend is up right now
+			data["health"] = p.health()
+		}
+		_ = json.NewEncoder(w).Encode(data)
+		return true
+	case "/stats/control":
+		p.handleControl(w, r)
 		return true
 	default:
 		return false
 	}
+}
+
+// handleControl runs the backend start/stop command selected by the ?action=
+// query parameter (POST only): it runs the command synchronously (it must finish
+// before the page shows the result) and reports the outcome as JSON
+func (p *Policy) handleControl(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var cmd, action string
+	switch r.URL.Query().Get("action") {
+	case "start":
+		action, cmd = "start", p.startCmd
+	case "stop":
+		action, cmd = "stop", p.stopCmd
+	default:
+		http.Error(w, "unknown action", http.StatusBadRequest)
+		return
+	}
+	if cmd == "" {
+		http.Error(w, action+" command not configured", http.StatusBadRequest)
+		return
+	}
+	if !p.ctrlMu.TryLock() {
+		http.Error(w, "another control command is already running", http.StatusConflict)
+		return
+	}
+	defer p.ctrlMu.Unlock()
+
+	ok := command.RunCommand(p.ctx, "stats-control "+action, cmd)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      ok,
+		"message": fmt.Sprintf("%s command %s", action, map[bool]string{true: "completed", false: "failed"}[ok]),
+	})
 }
 
 // purge deletes day files whose date is older than the retention window

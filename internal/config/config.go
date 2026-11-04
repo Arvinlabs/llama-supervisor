@@ -204,6 +204,12 @@ type CloudGroup struct {
 	// once; further requests wait for a slot (or for their client to disconnect).
 	// 0 (default) means unlimited
 	MaxConcurrency int `yaml:"maxConcurrency"`
+	// Fallback whether a request is routed to the cloud when the local backend
+	// is down (as reported by the backend health probe), skipping the
+	// size-based decision. Default true (unset); set false to keep sending the
+	// request to the dead local backend (a 502) instead. A pointer so the
+	// "unset" (default true) and "explicit false" states are distinguishable
+	Fallback *bool `yaml:"fallback"`
 	// Tokenizer the source of the prompt token count: "tiktoken" (default)
 	// counts the text locally with the OpenAI-compatible BPE encoding of
 	// TiktokenModel, without any backend round-trip (the decision works while
@@ -251,6 +257,12 @@ type StatsGroup struct {
 	Enable     bool   `yaml:"enable"`     // whether enabled
 	SavePath   string `yaml:"savePath"`   // directory the per-day stats JSON files (YYYY-MM-DD.json) are saved to; empty disables the policy
 	RetainDays int    `yaml:"retainDays"` // how many days of stats files are kept (older ones are deleted), default 7
+	// StartCommand shell command that starts the backend, run from the /stats page's
+	// start button; empty hides the button
+	StartCommand string `yaml:"startCommand"`
+	// StopCommand shell command that stops the backend, run from the /stats page's
+	// stop button; empty hides the button
+	StopCommand string `yaml:"stopCommand"`
 }
 
 func (g *StatsGroup) Enabled() bool {
@@ -261,6 +273,10 @@ type Config struct {
 	Host           string          `yaml:"host"`
 	Port           int             `yaml:"port"`
 	Backend        string          `yaml:"backend"`
+	// HealthInterval seconds between liveness polls of the backend's TCP port.
+	// The state drives the /stats page's start/stop buttons and, when the cloud
+	// fallback is enabled, the routing decision. Default 120
+	HealthInterval int             `yaml:"healthInterval"`
 	ApiKey         string          `yaml:"apiKey"` // global backend API key, sent as Bearer <key> on probe and /slots sampling requests; not used by normal proxying
 	StartupCommand string          `yaml:"startupCommand"`
 	Restart        *RestartGroup   `yaml:"restart"`
@@ -288,6 +304,23 @@ func StatsRetainDays(cfg Config) int {
 		return cfg.Stats.RetainDays
 	}
 	return 7
+}
+
+// HealthInterval returns the backend health poll interval (default 120s)
+func HealthInterval(cfg Config) time.Duration {
+	if cfg.HealthInterval > 0 {
+		return time.Duration(cfg.HealthInterval) * time.Second
+	}
+	return 120 * time.Second
+}
+
+// CloudFallback reports whether requests are routed to the cloud when the local
+// backend is down (cloud.fallback, default true; only an explicit false disables it)
+func CloudFallback(cfg Config) bool {
+	if cfg.Cloud == nil || cfg.Cloud.Fallback == nil {
+		return true
+	}
+	return *cfg.Cloud.Fallback
 }
 
 // ProbeInterval returns the probe group's idle threshold (configured in seconds)

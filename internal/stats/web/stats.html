@@ -39,8 +39,31 @@
             background: #f2f4f7;
         }
 
+        button:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+
+        button:disabled:hover {
+            background: #fff;
+        }
+
+        .health {
+            font-size: .9rem;
+            color: #6b7280;
+            align-self: center;
+        }
+
+        .health.down {
+            color: #c00;
+        }
+
         .err {
             color: #c00;
+        }
+
+        .ok {
+            color: #0a7d2c;
         }
 
         .panel {
@@ -51,6 +74,7 @@
         .panel-head {
             display: flex;
             justify-content: flex-end;
+            gap: .6rem;
             margin-bottom: .6rem;
         }
 
@@ -313,7 +337,12 @@
 <body>
     <span id="err" class="err"></span>
     <div class="panel" id="panel" hidden>
-        <div class="panel-head"><button onclick="load()">refresh</button></div>
+        <div class="panel-head">
+            <span id="health" class="health" hidden></span>
+            <button id="btn-start" hidden onclick="control('start')">start backend</button>
+            <button id="btn-stop" hidden onclick="control('stop')">stop backend</button>
+            <button onclick="load()">refresh</button>
+        </div>
         <div class="card" id="hour-card" hidden>
             <div class="card-head"><span class="card-title" id="hour-title">Tokens</span><span class="card-total"
                     id="hour-total"></span></div>
@@ -490,13 +519,82 @@
             return rows;
         }
 
+        // setMsg shows a transient message: class "ok" for success, "err" for failure
+        function setMsg(text, ok) {
+            const m = document.getElementById("err");
+            m.textContent = text;
+            m.className = ok ? "ok" : "err";
+            if (ok) setTimeout(() => { if (m.textContent === text) m.textContent = ""; }, 5000);
+        }
+
+        // backendUp is the last liveness state reported by /stats/data (hasHealth
+        // false: no state reported, the buttons are never gated); when a state
+        // is known the start button is enabled only while the backend is down
+        // (and vice versa)
+        let backendUp = true;
+        let hasHealth = false;
+
+        // applyButtons re-derives the start/stop button states from the liveness
+        // state; without one both buttons stay enabled (the user decides)
+        function applyButtons() {
+            if (!hasHealth) {
+                document.getElementById("btn-start").disabled = false;
+                document.getElementById("btn-stop").disabled = false;
+                return;
+            }
+            document.getElementById("btn-start").disabled = backendUp;
+            document.getElementById("btn-stop").disabled = !backendUp;
+        }
+
+        // control runs a backend start/stop command on the server and shows the outcome;
+        // the buttons stay disabled while a command runs, then revert to the health state
+        async function control(action) {
+            const btns = [document.getElementById("btn-start"), document.getElementById("btn-stop")];
+            btns.forEach(b => b.disabled = true);
+            try {
+                const r = await fetch("/stats/control?action=" + action, { method: "POST" });
+                let d = {};
+                try { d = await r.json(); } catch (e) { /* non-JSON error body */ }
+                if (r.ok && d.ok) {
+                    setMsg(action + " ok", true);
+                    backendUp = action === "start";
+                } else {
+                    setMsg(action + " failed: " + (d.message || "HTTP " + r.status), false);
+                }
+            } catch (e) {
+                setMsg(action + " failed: " + e.message, false);
+            } finally {
+                applyButtons();
+            }
+        }
+
         async function load() {
             const err = document.getElementById("err");
             err.textContent = "";
+            err.className = "err";
             try {
                 const r = await fetch("/stats/data");
                 if (!r.ok) throw new Error("HTTP " + r.status);
                 const d = await r.json();
+                // show the control buttons only when the matching command is configured
+                document.getElementById("btn-start").hidden = !d.start;
+                document.getElementById("btn-stop").hidden = !d.stop;
+                // liveness state: when the server reports one, start is clickable
+                // only while the backend is down (stop only while it is up); without
+                // a state there is no gating and the buttons stay up to the user
+                const health = document.getElementById("health");
+                if ("health" in d) {
+                    hasHealth = true;
+                    backendUp = d.health;
+                    applyButtons();
+                    health.hidden = false;
+                    health.textContent = "backend: " + (backendUp ? "up" : "down");
+                    health.className = "health" + (backendUp ? "" : " down");
+                } else {
+                    document.getElementById("btn-start").disabled = false;
+                    document.getElementById("btn-stop").disabled = false;
+                    health.hidden = true;
+                }
                 const rows = d.days || [];
                 document.getElementById("day-title").textContent = rows.length + " Days";
 

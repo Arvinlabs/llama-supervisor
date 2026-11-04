@@ -5,6 +5,10 @@ port: 8080
 # backend llama.cpp address
 backend: "http://127.0.0.1:8081"
 
+# seconds between liveness polls of the backend's TCP port; the state drives the
+# /stats page's start/stop buttons and the cloud down-fallback. Default 120
+healthInterval: 120
+
 # global backend API key (sent as Bearer <key> on probe, /slots sampling, cloud context-window detection and the /tokenize prompt counting the cloud routing depends on; not used by normal proxying), default empty (not sent). Required on key-protected backends, otherwise the cloud routing cannot see the context window or count a prompt and everything stays local
 apiKey: ""
 
@@ -113,6 +117,12 @@ stats:
   savePath: ""
   # how many days of stats files are kept, older ones are deleted; default 7
   retainDays: 7
+  # shell command that starts the backend, run by the start button on the /stats
+  # page; empty hides the button
+  startCommand: ""
+  # shell command that stops the backend, run by the stop button on the /stats
+  # page; empty hides the button
+  stopCommand: ""
 
 # ===== debug config: enabled when enable is true =====
 # a manual trigger: requesting the endpoint runs the command synchronously and returns the result
@@ -163,6 +173,10 @@ request:
 # (non-chat paths, undecidable requests) always stay local
 cloud:
   enable: false
+  # route a request to the cloud when the local backend is down (as reported by
+  # the stats backend health probe), skipping the size-based decision; default
+  # true, set false to keep sending the request to the dead local backend (a 502)
+  fallback: true
   # cloud endpoint base URL, e.g. https://api.deepseek.com (no trailing slash)
   baseUrl: "https://api.deepseek.com"
   # cloud API key, sent to the cloud as Bearer <key>; client keys (virtual or real)

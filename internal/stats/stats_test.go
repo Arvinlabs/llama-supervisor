@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +18,7 @@ import (
 // newTestPolicy builds a policy over a fresh temp dir with the given retention
 func newTestPolicy(t *testing.T, retainDays int) *Policy {
 	t.Helper()
-	return New(&config.StatsGroup{Enable: true, SavePath: t.TempDir(), RetainDays: retainDays})
+	return New(&config.StatsGroup{Enable: true, SavePath: t.TempDir(), RetainDays: retainDays}, context.Background())
 }
 
 // todayFile returns today's day file path in the policy's save dir
@@ -118,7 +119,7 @@ func TestPurgeAtStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	New(&config.StatsGroup{Enable: true, SavePath: dir, RetainDays: 30})
+	New(&config.StatsGroup{Enable: true, SavePath: dir, RetainDays: 30}, context.Background())
 	if _, err := os.Stat(filepath.Join(dir, old+".json")); !os.IsNotExist(err) {
 		t.Fatalf("expired day file not purged: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestDefaultRetainDays(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p := New(&config.StatsGroup{Enable: true, SavePath: dir})
+	p := New(&config.StatsGroup{Enable: true, SavePath: dir}, context.Background())
 	if p.retainDays != 7 {
 		t.Fatalf("default retention = %d, want 7", p.retainDays)
 	}
@@ -238,6 +239,154 @@ func TestHandleServesPageAndData(t *testing.T) {
 	// any other path is left untouched (to be proxied)
 	if p.Handle(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://s/other", nil)) {
 		t.Fatal("other paths must not be handled")
+	}
+}
+
+// the data endpoint reports which control buttons the page must show
+func TestDataReportsControlAvailability(t *testing.T) {
+	p := New(&config.StatsGroup{Enable: true, SavePath: t.TempDir(), StartCommand: "true", StopCommand: "true"}, context.Background())
+	w := httptest.NewRecorder()
+	if !p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/data", nil)) {
+		t.Fatal("/stats/data must be handled")
+	}
+	var d struct {
+		Start bool `json:"start"`
+		Stop  bool `json:"stop"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Start || !d.Stop {
+		t.Fatalf("both commands configured, want both flags true: %s", w.Body.String())
+	}
+
+	p = newTestPolicy(t, 30) // no commands configured
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/data", nil))
+	d = struct {
+		Start bool `json:"start"`
+		Stop  bool `json:"stop"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Start || d.Stop {
+		t.Fatalf("no commands configured, want both flags false: %s", w.Body.String())
+	}
+}
+
+// the data endpoint reports the backend liveness state when a provider is set
+func TestDataReportsHealth(t *testing.T) {
+	p := newTestPolicy(t, 30)
+	up := true
+	p.SetHealth(func() bool { return up })
+
+	w := httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/data", nil))
+	var d struct {
+		Health *bool `json:"health"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Health == nil || !*d.Health {
+		t.Fatalf("health = %v, want true: %s", d.Health, w.Body.String())
+	}
+
+	up = false
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/data", nil))
+	d = struct {
+		Health *bool `json:"health"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Health == nil || *d.Health {
+		t.Fatalf("health = %v, want false: %s", d.Health, w.Body.String())
+	}
+
+	// without a provider the field is absent
+	p2 := newTestPolicy(t, 30)
+	w = httptest.NewRecorder()
+	_ = p2.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/data", nil))
+	d = struct {
+		Health *bool `json:"health"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Health != nil {
+		t.Fatalf("health = %v, want absent: %s", d.Health, w.Body.String())
+	}
+}
+
+// the control endpoint runs the configured command (POST start/stop only);
+// an unset command or unknown action is rejected
+func TestControlEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	p := New(&config.StatsGroup{
+		Enable: true, SavePath: t.TempDir(),
+		StartCommand: "touch " + marker,
+	}, context.Background())
+
+	// a running start command is reported as ok
+	w := httptest.NewRecorder()
+	if !p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=start", nil)) {
+		t.Fatal("/stats/control must be handled")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || !resp.OK {
+		t.Fatalf("start must succeed: %s", w.Body.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("start command did not run: %v", err)
+	}
+
+	// the stop command is not configured
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=stop", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unset stop command = %d, want 400: %s", w.Code, w.Body.String())
+	}
+
+	// unknown actions are rejected
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=reboot", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown action = %d, want 400", w.Code)
+	}
+
+	// GET is rejected (a control request must never be a proxied GET)
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodGet, "http://s/stats/control?action=start", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET = %d, want 405", w.Code)
+	}
+
+	// a failing command is reported as not ok
+	p.stopCmd = "exit 3"
+	w = httptest.NewRecorder()
+	_ = p.Handle(w, httptest.NewRequest(http.MethodPost, "http://s/stats/control?action=stop", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
+	}
+	resp = struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK {
+		t.Fatalf("failing command must report ok=false: %s", w.Body.String())
 	}
 }
 
