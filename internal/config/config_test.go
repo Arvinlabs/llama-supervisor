@@ -100,6 +100,33 @@ cloud:
 	}
 }
 
+// the listener network address family: the allowed values (case-insensitive)
+// load and normalize through NetworkOf, an empty value defaults to "tcp", and
+// an unknown value is rejected
+func TestListenerNetwork(t *testing.T) {
+	if got := NetworkOf(Config{}); got != "tcp" {
+		t.Fatalf("default network = %q, want tcp", got)
+	}
+	for _, v := range []string{"tcp", "tcp4", "TCP6"} {
+		cfg, err := loadTempConfig(t, "backend: http://127.0.0.1:8080\nnetwork: "+v+"\n")
+		if err != nil {
+			t.Fatalf("network %q rejected: %v", v, err)
+		}
+		want := v
+		if v == "TCP6" {
+			want = "tcp6"
+		}
+		if got := NetworkOf(cfg); got != want {
+			t.Fatalf("network %q normalized to %q, want %q", v, got, want)
+		}
+	}
+	for _, v := range []string{"udp", "ip6", "tcp7"} {
+		if _, err := loadTempConfig(t, "backend: http://127.0.0.1:8080\nnetwork: "+v+"\n"); err == nil {
+			t.Fatalf("network %q must be rejected", v)
+		}
+	}
+}
+
 // the backend health poll interval defaults to 120s (a configured value
 // wins); the cloud down-fallback defaults to true
 func TestHealthIntervalAndCloudFallbackDefaults(t *testing.T) {

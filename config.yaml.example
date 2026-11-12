@@ -1,6 +1,8 @@
 # listen host / port
 host: "0.0.0.0"
 port: 8080
+# listen network address family: "tcp" (default, both stacks), "tcp4" (IPv4 only) or "tcp6" (IPv6 only)
+network: "tcp"
 
 # backend llama.cpp address
 backend: "http://127.0.0.1:8081"

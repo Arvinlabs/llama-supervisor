@@ -57,6 +57,7 @@ func main() {
 	defer stopSignal()
 
 	log.Printf("llama-supervisor %s (built %s, %s)", Version, BuildTime, runtime.Version())
+	log.Printf("[config] listen network=%s", config.NetworkOf(cfg))
 	log.Print("[config] apiKey=" + config.SecretMask(cfg.ApiKey))
 	log.Printf("[config] backend health probe: interval=%ds", int(config.HealthInterval(cfg).Seconds()))
 
@@ -169,9 +170,10 @@ func main() {
 	sup := proxy.New(cfg, ctx)
 	sup.StartBackground(ctx)
 
-	ln, err := net.Listen("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
+	network := config.NetworkOf(cfg)
+	ln, err := net.Listen(network, net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
 	if err != nil {
-		log.Fatalf("listen %s:%d failed: %v", cfg.Host, cfg.Port, err)
+		log.Fatalf("listen %s %s:%d failed: %v", network, cfg.Host, cfg.Port, err)
 	}
 	log.Printf("supervisor listening on http://%s:%d -> %s", cfg.Host, cfg.Port, cfg.Backend)
 

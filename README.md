@@ -39,6 +39,7 @@ cp config.yaml.example config.yaml
 | Field | Description |
 |---|---|
 | `host` / `port` | listen address |
+| `network` | listen network address family: `tcp` (default, both stacks), `tcp4` (IPv4 only) or `tcp6` (IPv6 only) |
 | `backend` | backend address, e.g. `http://127.0.0.1:8081` |
 | `healthInterval` | seconds between liveness polls of the backend's TCP port (independent of stats); the state drives the `/stats` page's start/stop buttons and the cloud down-fallback, default `120` |
 | `apiKey` | global backend API key, sent as `Bearer <key>` on probe, `/slots` sampling, cloud context-window detection and `/tokenize` estimation requests; when `request.virtualKeys` is enabled it also re-signs accepted proxied requests, default empty. On a key-protected backend the `cloud` sub-features (n_ctx detection, exact token counting) need it |

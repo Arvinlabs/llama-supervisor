@@ -270,9 +270,12 @@ func (g *StatsGroup) Enabled() bool {
 }
 
 type Config struct {
-	Host           string          `yaml:"host"`
-	Port           int             `yaml:"port"`
-	Backend        string          `yaml:"backend"`
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+	// Network the listener's network address family: "tcp" (default, both
+	// stacks), "tcp4" (IPv4 only) or "tcp6" (IPv6 only)
+	Network string `yaml:"network"`
+	Backend string `yaml:"backend"`
 	// HealthInterval seconds between liveness polls of the backend's TCP port.
 	// The state drives the /stats page's start/stop buttons and, when the cloud
 	// fallback is enabled, the routing decision. Default 120
@@ -304,6 +307,16 @@ func StatsRetainDays(cfg Config) int {
 		return cfg.Stats.RetainDays
 	}
 	return 7
+}
+
+// NetworkOf returns the listener's effective network address family
+// (default "tcp"; case-insensitive)
+func NetworkOf(cfg Config) string {
+	switch strings.ToLower(cfg.Network) {
+	case "tcp4", "tcp6":
+		return strings.ToLower(cfg.Network)
+	}
+	return "tcp"
 }
 
 // HealthInterval returns the backend health poll interval (default 120s)
@@ -342,6 +355,11 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Backend == "" {
 		return cfg, fmt.Errorf("config missing backend")
+	}
+	switch strings.ToLower(cfg.Network) {
+	case "", "tcp", "tcp4", "tcp6":
+	default:
+		return cfg, fmt.Errorf("network %q: must be \"tcp\", \"tcp4\" or \"tcp6\"", cfg.Network)
 	}
 	if cfg.Cloud != nil {
 		if cfg.Cloud.Enable {
