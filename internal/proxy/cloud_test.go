@@ -279,11 +279,12 @@ func TestPollHealthDialsBackendPort(t *testing.T) {
 		t.Fatal("unreachable backend must report down")
 	}
 
-	// a new reachable port flips the state back to up
+	// a new reachable port flips the state back to up (the address is
+	// retargeted while the poller runs)
 	local2 := &completionRecorder{}
 	localSrv2 := httptest.NewServer(local2.handler())
 	defer localSrv2.Close()
-	sup.backendAddr = localSrv2.Listener.Addr().String()
+	sup.setBackendDialAddr(localSrv2.Listener.Addr().String())
 	settle()
 	if !sup.health.up() {
 		t.Fatal("reachable backend must flip the state back to up")

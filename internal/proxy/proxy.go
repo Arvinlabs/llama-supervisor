@@ -31,7 +31,8 @@ import (
 type Supervisor struct {
 	proxy       *httputil.ReverseProxy
 	backendURL  string
-	backendAddr string // backend host:port (validated at startup, must carry an explicit port)
+	backendAddr string // backend host:port (validated at startup, must carry an explicit port); guarded by backendAddrMu: the health poll reads it on every tick
+	backendAddrMu sync.RWMutex
 
 	cloudRoute *cloudRouter           // cloud router (nil when the cloud is disabled)
 	cloudProxy *httputil.ReverseProxy // the second reverse proxy, to the cloud endpoint
@@ -498,19 +499,35 @@ func (h *backendHealth) up() bool {
 	return h.alive
 }
 
+// backendDialAddr reports the current backend dial address (the health poll
+// reads it on every tick; tests may retarget it while the poller runs)
+func (p *Supervisor) backendDialAddr() string {
+	p.backendAddrMu.RLock()
+	defer p.backendAddrMu.RUnlock()
+	return p.backendAddr
+}
+
+// setBackendDialAddr retargets the health poll (used by tests)
+func (p *Supervisor) setBackendDialAddr(addr string) {
+	p.backendAddrMu.Lock()
+	p.backendAddr = addr
+	p.backendAddrMu.Unlock()
+}
+
 // pollHealth dials the backend port once at startup and then every
 // healthInterval; only state changes are logged
 func (p *Supervisor) pollHealth(ctx context.Context) {
 	ticker := time.NewTicker(p.healthInterval)
 	defer ticker.Stop()
 	check := func() {
-		conn, err := net.DialTimeout("tcp", p.backendAddr, 2*time.Second)
+		addr := p.backendDialAddr()
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		up := err == nil
 		if up {
 			_ = conn.Close()
 		}
 		if p.health.up() != up {
-			log.Printf("[health] backend %s is %s", p.backendAddr, map[bool]string{true: "up", false: "down"}[up])
+			log.Printf("[health] backend %s is %s", addr, map[bool]string{true: "up", false: "down"}[up])
 			p.health.set(up)
 		}
 	}
@@ -609,7 +626,7 @@ func logAccess(status int, target string, r *http.Request, start time.Time) {
 
 // waitBackendReady polls the backend /health after a command ran, until the service is truly ready (2xx) before forwarding
 func (p *Supervisor) waitBackendReady(ctx context.Context) {
-	log.Printf("[proxy] waiting for backend %s to be ready", p.backendAddr)
+	log.Printf("[proxy] waiting for backend %s to be ready", p.backendDialAddr())
 	client := &http.Client{Timeout: 5 * time.Second}
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.backendURL+"/health", nil)
