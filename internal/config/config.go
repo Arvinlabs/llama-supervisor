@@ -121,6 +121,26 @@ func (g *ErrGuardGroup) Enabled() bool {
 	return g != nil && g.Enable
 }
 
+// LazyGroup lazy lifecycle config; Enable true means enabled. The supervisor
+// manages the backend lifecycle around traffic: a request that finds the backend
+// down starts it asynchronously (the request itself is not blocked - it goes to
+// the cloud fallback or a 502), and when no request has used the local backend for
+// interval seconds the backend is stopped
+type LazyGroup struct {
+	Enable bool `yaml:"enable"` // whether enabled
+	// Interval seconds of local idle before the backend is stopped, default 3600
+	Interval int `yaml:"interval"`
+	// StartCommand shell command that starts the backend, run asynchronously by the
+	// first request that finds the backend down; the current request never waits for it
+	StartCommand string `yaml:"startCommand"`
+	// StopCommand shell command that stops the backend, run when the idle timeout is crossed
+	StopCommand string `yaml:"stopCommand"`
+}
+
+func (g *LazyGroup) Enabled() bool {
+	return g != nil && g.Enable
+}
+
 // EffectiveCooldown returns the error guard's effective cooldown: the configured
 // seconds, the default 30s when unset (0), and 0 (disabled) when set negative
 func (g *ErrGuardGroup) EffectiveCooldown() time.Duration {
@@ -291,6 +311,7 @@ type Config struct {
 	Stats          *StatsGroup     `yaml:"stats"`
 	Debug          *DebugGroup     `yaml:"debug"`
 	ErrGuard       *ErrGuardGroup  `yaml:"errguard"`
+	Lazy           *LazyGroup      `yaml:"lazy"`
 }
 
 // RestartInterval returns the restart group's idle threshold (configured in seconds)
@@ -334,6 +355,14 @@ func CloudFallback(cfg Config) bool {
 		return true
 	}
 	return *cfg.Cloud.Fallback
+}
+
+// LazyInterval returns the lazy group's idle-stop threshold (configured in seconds, default 3600)
+func LazyInterval(cfg Config) time.Duration {
+	if cfg.Lazy.Enabled() && cfg.Lazy.Interval > 0 {
+		return time.Duration(cfg.Lazy.Interval) * time.Second
+	}
+	return time.Hour
 }
 
 // ProbeInterval returns the probe group's idle threshold (configured in seconds)
@@ -389,6 +418,14 @@ func LoadConfig(path string) (Config, error) {
 		case "", "backend", "tiktoken":
 		default:
 			return cfg, fmt.Errorf("cloud tokenizer %q: must be \"backend\" or \"tiktoken\"", cfg.Cloud.Tokenizer)
+		}
+	}
+	if cfg.Lazy != nil && cfg.Lazy.Enable {
+		if cfg.Lazy.StartCommand == "" || cfg.Lazy.StopCommand == "" {
+			return cfg, fmt.Errorf("lazy enabled but startCommand/stopCommand missing")
+		}
+		if cfg.Lazy.Interval < 0 {
+			return cfg, fmt.Errorf("lazy interval %d: must not be negative", cfg.Lazy.Interval)
 		}
 	}
 	return cfg, nil

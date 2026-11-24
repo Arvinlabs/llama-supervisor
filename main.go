@@ -147,6 +147,14 @@ func main() {
 	} else {
 		log.Print("[config] debug disabled")
 	}
+	if cfg.Lazy.Enabled() {
+		log.Printf("[config] lazy enabled: idleStop=%ds (start is asynchronous, triggered by the first request that finds the backend down)",
+			int(config.LazyInterval(cfg).Seconds()))
+		log.Print("[config] lazy start command: " + cfg.Lazy.StartCommand)
+		log.Print("[config] lazy stop command: " + cfg.Lazy.StopCommand)
+	} else {
+		log.Print("[config] lazy disabled")
+	}
 	if cfg.ErrGuard.Enabled() {
 		scope := "no pattern (never triggers)"
 		if n := len(cfg.ErrGuard.Patterns); n > 0 {

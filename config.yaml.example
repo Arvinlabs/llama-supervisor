@@ -17,6 +17,22 @@ apiKey: ""
 # startup command
 startupCommand: "sudo /usr/bin/supervisorctl start llama"
 
+# ===== lazy lifecycle config: enabled when enable is true =====
+# the supervisor manages the backend lifecycle around the traffic: a request that
+# finds the backend down starts it asynchronously (the request itself is not
+# blocked for the model load - it goes to the cloud fallback or a 502), and when
+# no request has used the local backend for `interval` seconds the backend is
+# stopped. A cloud-routed request also triggers the start but never waits for it
+lazy:
+  enable: false
+  # seconds of local idle before the backend is stopped, default 3600
+  interval: 3600
+  # shell command that starts the backend, run asynchronously by the first
+  # request that finds the backend down
+  startCommand: "sudo /usr/bin/supervisorctl start llama"
+  # shell command that stops the backend, run when the idle timeout is crossed
+  stopCommand: "sudo /usr/bin/supervisorctl stop llama"
+
 # ===== restart config: enabled when enable is true =====
 restart:
   enable: true

@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Arvinlabs/llama-supervisor/internal/anthropic"
 	"github.com/Arvinlabs/llama-supervisor/internal/config"
 	"github.com/Arvinlabs/llama-supervisor/internal/debug"
 	"github.com/Arvinlabs/llama-supervisor/internal/errguard"
+	"github.com/Arvinlabs/llama-supervisor/internal/lazy"
 	"github.com/Arvinlabs/llama-supervisor/internal/observe"
 	"github.com/Arvinlabs/llama-supervisor/internal/probe"
 	"github.com/Arvinlabs/llama-supervisor/internal/request"
@@ -41,17 +43,19 @@ type Supervisor struct {
 	// never sees cloud completions (see observe.CloudConsumer)
 	observeCloud bool
 
-	restart   *restart.Policy    // restart policy (nil when restart is disabled)
-	probe     *probe.Policy      // probe policy (nil when probe is disabled)
-	watchdog  *watchdog.Policy   // watchdog policy (nil when watchdog is disabled)
-	request   *request.Policy    // request policy (nil when no request sub-feature is enabled)
-	stats          *stats.Policy    // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
-	health         *backendHealth   // backend-port liveness tracker (healthInterval)
-	healthInterval time.Duration    // interval between backend liveness polls
-	cloudFallback  bool             // route to the cloud when the local backend is down (cloud.fallback)
-	debug     *debug.Policy      // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
-	errguard  *errguard.Policy   // error guard policy (nil when disabled); runs the command when a tapped backend error message matches a pattern
-	anthropic *anthropic.Handler // Anthropic /v1/messages handler (nil when the anthropic protocol is disabled)
+	restart        *restart.Policy    // restart policy (nil when restart is disabled)
+	probe          *probe.Policy      // probe policy (nil when probe is disabled)
+	watchdog       *watchdog.Policy   // watchdog policy (nil when watchdog is disabled)
+	request        *request.Policy    // request policy (nil when no request sub-feature is enabled)
+	stats          *stats.Policy      // stats consumer (nil when stats is disabled); accounts /v1/chat/completions token usage per day
+	health         *backendHealth     // backend-port liveness tracker (healthInterval)
+	healthInterval time.Duration      // interval between backend liveness polls
+	cloudFallback  bool               // route to the cloud when the local backend is down (cloud.fallback)
+	localInflight  atomic.Int64       // requests currently being served by the local backend: the background idle policies (restart, lazy stop) do not run their command while any is in flight
+	debug          *debug.Policy      // debug policy (nil when debug is disabled); Tap/TapOutbound dump inbound/outbound requests when the save paths are set
+	errguard       *errguard.Policy   // error guard policy (nil when disabled); runs the command when a tapped backend error message matches a pattern
+	lazy           *lazy.Policy       // lazy lifecycle policy (nil when disabled); starts the backend asynchronously on the first request that finds it down, stops it after the idle timeout
+	anthropic      *anthropic.Handler // Anthropic /v1/messages handler (nil when the anthropic protocol is disabled)
 }
 
 // New creates the reverse proxy to the backend; ctx is the server-level ctx (probes do not follow user requests)
@@ -203,8 +207,11 @@ func New(cfg config.Config, ctx context.Context) *Supervisor {
 	// the cloud fallback (route to the cloud when the local backend is down)
 	// needs a cloud route
 	p.cloudFallback = cfg.Cloud.Enabled() && config.CloudFallback(cfg)
-	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.cloudRoute == nil && p.anthropic == nil && p.stats == nil && p.debug == nil && p.errguard == nil {
-		log.Print("[config] restart, probe, watchdog, request, cloud, anthropic, stats, debug and errguard all disabled, proxying only")
+	if cfg.Lazy.Enabled() {
+		p.lazy = lazy.New(ctx, cfg.Backend, cfg.Lazy, config.LazyInterval(cfg), p.health.up, p.health.set)
+	}
+	if p.restart == nil && p.probe == nil && p.watchdog == nil && p.request == nil && p.cloudRoute == nil && p.anthropic == nil && p.stats == nil && p.debug == nil && p.errguard == nil && p.lazy == nil {
+		log.Print("[config] restart, probe, watchdog, request, cloud, anthropic, stats, debug, errguard and lazy all disabled, proxying only")
 	}
 	return p
 }
@@ -218,6 +225,9 @@ func (p *Supervisor) OnHTTPRequest() {
 	}
 	if p.probe != nil {
 		p.probe.OnHTTPRequest()
+	}
+	if p.lazy != nil {
+		p.lazy.OnHTTPRequest()
 	}
 }
 
@@ -346,6 +356,13 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.debug.Tap(r) // no-op when debug.savePath is not set
 	}
 	rec := &statusRecorder{ResponseWriter: w}
+	// lazy start: the backend is reported down - kick off the start command
+	// asynchronously. The current request must not wait for the (possibly long)
+	// model load: it goes to the cloud fallback or 502 as usual, and the requests
+	// after the backend is up go local again
+	if p.lazy != nil && !p.health.up() {
+		p.lazy.StartAsync()
+	}
 	// cloud routing: the router buffers the body (reinstalled either way) and reports
 	// whether the request does not fit the local context window
 	routeToCloud := false
@@ -401,6 +418,12 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer p.cloudRoute.release()
 		p.cloudProxy.ServeHTTP(rec, r)
 	} else {
+		// count the request in flight to the local backend: the background idle
+		// policies (restart, lazy stop) skip their command while any is in flight,
+		// so a long generation is never interrupted by an idle stop/restart
+		// triggered by the idle window that expired just before the request arrived
+		p.localInflight.Add(1)
+		defer p.localInflight.Add(-1)
 		p.proxy.ServeHTTP(rec, r)
 	}
 	logAccess(rec.status, targetName(routeToCloud), r, start)
@@ -408,6 +431,12 @@ func (p *Supervisor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // StartBackground starts the background checkers:
 // restart checks once per second and runs restart.command when the idle deadline is crossed, periodically repeatable.
+// lazy checks once per second and runs lazy.stopCommand when its idle deadline is crossed (the lazy start is
+// request-driven and runs in the proxy's ServeHTTP path, asynchronously).
+// Neither idle policy runs its command while a request is still being served by the local
+// backend: the command is then deferred to the next tick, so a long generation is never
+// interrupted by a stop/restart triggered by the idle window that expired while the request
+// was arriving.
 // the backend liveness probe dials the backend port once at startup and then every stats.healthInterval.
 // (the watchdog's /slots sampling is request-driven and runs inside the watchdog policy itself)
 func (p *Supervisor) StartBackground(ctx context.Context) {
@@ -420,7 +449,27 @@ func (p *Supervisor) StartBackground(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					if p.localInflight.Load() > 0 {
+						continue // a request is still in flight; retry on the next tick
+					}
 					p.restart.ConsumeIdle(ctx)
+				}
+			}
+		}()
+	}
+	if p.lazy != nil {
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if p.localInflight.Load() > 0 {
+						continue // a request is still in flight; retry on the next tick
+					}
+					p.lazy.ConsumeIdle()
 				}
 			}
 		}()

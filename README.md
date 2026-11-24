@@ -46,6 +46,7 @@ cp config.yaml.example config.yaml
 | `startupCommand` | shell command run synchronously at startup |
 | `probe` | probe config object, enabled with `enable: true`, see below |
 | `restart` | restart config object, enabled with `enable: true`, see below |
+| `lazy` | lazy lifecycle config object, enabled with `enable: true`, see below |
 | `watchdog` | watchdog config object, enabled with `enable: true`, see below |
 | `errguard` | backend error guard config object, enabled with `enable: true`, see below |
 | `request` | request policy config object, see below |
@@ -78,13 +79,31 @@ Idle health probe. Timing starts at service startup and every request extends th
 
 Idle restart. An independent background check (once per second): timing starts after the first request, every request extends the idle window, and once idle for `restart.interval` seconds the command runs directly, without waiting for a request. After a trigger timing pauses (no requests means no timing), a new request resumes it, and it can repeat periodically.
 
-Only a request that is actually **served by the local backend** counts as activity: a cloud-routed request (see the `cloud` section) leaves the local model alone, so it neither extends the idle window nor triggers/starts timing. With cloud-only traffic the local component therefore stays "idle" as far as the restart (and probe) policies are concerned.
+Only a request that is actually **served by the local backend** counts as activity: a cloud-routed request (see the `cloud` section) leaves the local model alone, so it neither extends the idle window nor trigger/starts timing. With cloud-only traffic the local component therefore stays "idle" as far as the restart (and probe) policies are concerned.
+
+The check skips a tick while a request is still being served by the local backend (a request that arrived just as the window expired is counted), so the command is never run in the middle of a long generation: it is deferred to the next tick, at most 1s per tick in flight.
 
 | Field | Description |
 |---|---|
 | `restart.enable` | whether enabled, default `false` |
 | `restart.interval` | trigger after being idle this many seconds, default `600` |
 | `restart.command` | shell command run on idle timeout, e.g. restarting llama |
+
+### lazy
+
+Lazy backend lifecycle: the backend is started and stopped around the traffic instead of running permanently.
+
+- **Start (request-driven, asynchronous):** a request that finds the backend down (as reported by the health probe) kicks off `lazy.startCommand` in a background goroutine and returns immediately - the current request is *not* blocked for the (possibly long) model load, it goes to the cloud fallback (when the `cloud` down-fallback is enabled) or a 502, and the requests after the backend is up go local again. Concurrent requests stack only one start command; a failed start is retried by the next request. Once the start command has run, the supervisor polls the backend `/health` and marks the tracker up as soon as the backend answers 2xx, so the routing decision does not have to wait for a full health-poll interval.
+- **Stop (background, after idle):** an independent background check (once per second), the same lazy timing as `restart`: timing starts only after the first request that is actually served by the local backend, every such request extends the idle window, and once idle for `lazy.interval` seconds `lazy.stopCommand` runs - even without any further request arriving. After a trigger the timing pauses until the next request, so the cycle repeats for every burst of traffic.
+
+Only a request that is actually **served by the local backend** counts as activity (a cloud-routed request triggers the start but does not keep the stop timer alive), exactly as for the `restart` policy. The stop is skipped while a request is still in flight to the local backend (deferred to the next tick), so the backend is never stopped in the middle of a long generation.
+
+| Field | Description |
+|---|---|
+| `lazy.enable` | whether enabled, default `false` |
+| `lazy.interval` | seconds of local idle before the backend is stopped, default `3600` |
+| `lazy.startCommand` | shell command that starts the backend, run asynchronously by the first request that finds the backend down (the request never waits for it) |
+| `lazy.stopCommand` | shell command that stops the backend, run when the idle timeout is crossed |
 
 ### watchdog
 
